@@ -8592,29 +8592,78 @@ const _projTrailDirScratch = new THREE.Vector3();
 // ============================================================================
 // REAL-TIME AUTONOMOUS TWO-ARMY 3D BATTLE SIMULATION & CINEMATIC DIRECTOR
 // ============================================================================
+function isFiniteCoord(v) {
+    return typeof v === 'number' && Number.isFinite(v);
+}
+
+function isFiniteVec3(vec) {
+    return Boolean(vec && isFiniteCoord(vec.x) && isFiniteCoord(vec.y) && isFiniteCoord(vec.z));
+}
+
+function tagSceneObjectMetadata(obj, creationSource, subsystem, extra = null) {
+    if (!obj || typeof obj !== 'object') return obj;
+    if (!obj.userData) obj.userData = {};
+    obj.userData._creationSource = creationSource;
+    obj.userData._subsystem = subsystem;
+    if (extra && typeof extra === 'object') {
+        if (extra.participantId !== undefined) obj.userData._participantId = extra.participantId;
+        if (extra.bridgeId !== undefined) obj.userData._bridgeId = extra.bridgeId;
+        if (extra.role !== undefined) obj.userData._role = extra.role;
+    }
+    if (typeof obj.traverse === 'function') {
+        obj.traverse(child => {
+            if (!child) return;
+            if (!child.userData) child.userData = {};
+            child.userData._creationSource = creationSource;
+            child.userData._subsystem = subsystem;
+            if (extra && typeof extra === 'object') {
+                if (extra.participantId !== undefined) child.userData._participantId = extra.participantId;
+                if (extra.bridgeId !== undefined) child.userData._bridgeId = extra.bridgeId;
+            }
+        });
+    }
+    return obj;
+}
+window.tagSceneObjectMetadata = tagSceneObjectMetadata;
+
 function findDryCinematicBattlefieldCenter() {
     const surfFn = typeof getSurfaceHeightWithBridges === 'function' ? getSurfaceHeightWithBridges : getTerrainHeight;
+    if (Array.isArray(window.BRIDGES) && window.BRIDGES.length > 0 && window.BRIDGES[0] && window.BRIDGES[0].center) {
+        const bc = window.BRIDGES[0].center;
+        if (isFiniteCoord(bc.x) && isFiniteCoord(bc.z)) {
+            const by = surfFn(bc.x, bc.z);
+            return new THREE.Vector3(bc.x, isFiniteCoord(by) ? by : 0.35, bc.z);
+        }
+    }
+    const midX = (isFiniteCoord(PLAYER_START_POS?.x) && isFiniteCoord(ENEMY_BASE_POS?.x))
+        ? (PLAYER_START_POS.x + ENEMY_BASE_POS.x) * 0.5
+        : 0;
+    const midZ = (isFiniteCoord(PLAYER_START_POS?.z) && isFiniteCoord(ENEMY_BASE_POS?.z))
+        ? (PLAYER_START_POS.z + ENEMY_BASE_POS.z) * 0.5
+        : 0;
     const candidates = [
-        { x: 0, z: 22 },
-        { x: -16, z: 24 },
-        { x: 16, z: 20 },
-        { x: -24, z: -18 },
-        { x: 24, z: -20 }
+        { x: midX, z: midZ },
+        { x: 0, z: 0 },
+        { x: -16, z: 18 },
+        { x: 16, z: -18 },
+        { x: -22, z: -16 },
+        { x: 22, z: 16 }
     ];
-    let bestPt = { x: 0, z: 22 };
+    let bestPt = candidates[0];
     let bestScore = -Infinity;
     for (let i = 0; i < candidates.length; i++) {
         const c = candidates[i];
         let dryCount = 0;
         let avgH = 0;
-        for (let sx = -12; sx <= 12; sx += 6) {
-            for (let sz = -12; sz <= 12; sz += 6) {
+        for (let sx = -10; sx <= 10; sx += 5) {
+            for (let sz = -10; sz <= 10; sz += 5) {
                 const px = c.x + sx;
                 const pz = c.z + sz;
                 const h = surfFn(px, pz);
+                if (!isFiniteCoord(h)) continue;
                 avgH += h;
                 const rDist = typeof getRiverDist === 'function' ? getRiverDist(px, pz) : 99;
-                if (h > 0.15 && rDist > 5.0) dryCount++;
+                if (h > 0.12 && rDist > 4.5) dryCount++;
             }
         }
         const score = dryCount * 10 + avgH * 0.25;
@@ -8623,8 +8672,63 @@ function findDryCinematicBattlefieldCenter() {
             bestPt = c;
         }
     }
-    return new THREE.Vector3(bestPt.x, surfFn(bestPt.x, bestPt.z), bestPt.z);
+    const finalY = surfFn(bestPt.x, bestPt.z);
+    return new THREE.Vector3(bestPt.x, isFiniteCoord(finalY) ? finalY : 0.25, bestPt.z);
 }
+
+const CINEMATIC_FACTION_DEFS = {
+    terran: {
+        id: 'terran',
+        name: 'TERRAN DOMINION',
+        workerType: 'terran',
+        structures: {
+            base: 'base',
+            pylon: 'power',
+            barracks: 'barracks',
+            factory: 'bay',
+            airfield: 'airfield',
+            turret: 'turret'
+        },
+        infantryPool: ['grunt', 'ranger', 'marauder', 'firebat', 'rocketman'],
+        heavyPool: ['tank'],
+        airPool: ['heli'],
+        vanguard: ['grunt', 'ranger', 'marauder', 'firebat', 'tank']
+    },
+    protoss: {
+        id: 'protoss',
+        name: 'PROTOSS FLEET',
+        workerType: 'protoss',
+        structures: {
+            base: 'solaris_nexus',
+            pylon: 'solaris_pylon',
+            barracks: 'solaris_gate',
+            factory: 'solaris_robotics',
+            airfield: 'solaris_spire',
+            turret: 'solaris_spire'
+        },
+        infantryPool: ['zealot', 'stalker', 'sentinel', 'archon'],
+        heavyPool: ['immortal', 'colossus'],
+        airPool: ['voidray', 'carrier'],
+        vanguard: ['zealot', 'stalker', 'sentinel', 'immortal', 'voidray']
+    },
+    zerg: {
+        id: 'zerg',
+        name: 'ZERG SWARM',
+        workerType: 'zerg',
+        structures: {
+            base: 'citadel',
+            pylon: 'evolution_chamber',
+            barracks: 'barracks',
+            factory: 'hatchery',
+            airfield: 'spire',
+            turret: 'spine_turret'
+        },
+        infantryPool: ['skitterer', 'spitter', 'burster', 'spitter'],
+        heavyPool: ['crusher', 'behemoth'],
+        airPool: ['mutalisk'],
+        vanguard: ['skitterer', 'skitterer', 'spitter', 'crusher', 'behemoth']
+    }
+};
 
 window.BATTLE_CINEMATIC = {
     // Explicit Spectator AI Match Lifecycle States: "UNINITIALIZED" | "INITIALIZING" | "ACTIVE" | "CLEANING" | "DISPOSED"
@@ -8643,13 +8747,15 @@ window.BATTLE_CINEMATIC = {
     matchNumber: 1,
     matchWinner: null,
     victoryResetTimer: 0,
+    lastMapSeed: null,
+    _hiddenGameplayMeshes: [],
 
     STAGES: [
-        { id: 1, start: 0.0,  end: 15.0, title: 'BASE ESTABLISHMENT & RESOURCE MINING', subtitle: 'Autonomous workers harvesting minerals & Vespene gems to fund base expansion' },
-        { id: 2, start: 15.0, end: 30.0, title: 'TECH PRODUCTION & INFRASTRUCTURE', subtitle: 'AI Commanders constructing Barracks, Factories, Turrets & Spawning Pools' },
-        { id: 3, start: 30.0, end: 50.0, title: 'RECONNAISSANCE & VANGUARD SKIRMISH', subtitle: 'Forward strike squads contesting central resource nodes & bridges' },
-        { id: 4, start: 50.0, end: 70.0, title: 'COMBINED-ARMS FRONTLINE ASSAULT', subtitle: 'Heavy armor, air support & upgraded infantry clashing across the valley' },
-        { id: 5, start: 70.0, end: 90.0, title: 'SIEGE OF THE MAIN CITADEL', subtitle: 'Full-scale autonomous offensive pushing into fortified base perimeters' }
+        { id: 1, start: 0.0,  end: 15.0, title: 'BASE ESTABLISHMENT & RESOURCE MINING', subtitle: 'Autonomous workers harvesting minerals & Vespene gems on opposing base platforms' },
+        { id: 2, start: 15.0, end: 30.0, title: 'TECH PRODUCTION & INFRASTRUCTURE', subtitle: 'AI Commanders constructing production facilities, power matrices & defensive turrets' },
+        { id: 3, start: 30.0, end: 50.0, title: 'RECONNAISSANCE & VANGUARD SKIRMISH', subtitle: 'Forward strike squads descending base ramps to contest central crossings' },
+        { id: 4, start: 50.0, end: 70.0, title: 'COMBINED-ARMS FRONTLINE ASSAULT', subtitle: 'Heavy armor, air support & upgraded infantry clashing across the sector' },
+        { id: 5, start: 70.0, end: 90.0, title: 'SIEGE OF THE MAIN CITADEL', subtitle: 'Full-scale autonomous offensive pushing up opposing base ramps' }
     ],
 
     teams: {
@@ -8657,36 +8763,42 @@ window.BATTLE_CINEMATIC = {
             id: 'team_a',
             name: 'TERRAN DOMINION',
             faction: 'terran',
-            minerals: 260,
-            gems: 100,
+            minerals: 280,
+            gems: 110,
             techLevel: 1,
             supplyUsed: 0,
-            supplyCap: 24,
+            supplyCap: 28,
             baseAnchor: new THREE.Vector3(),
+            rampDir: new THREE.Vector3(0, 0, -1),
+            rampPos: new THREE.Vector3(),
             rallyPoint: new THREE.Vector3(),
+            platformRadius: 18.0,
             buildOrderIndex: 0,
-            buildTimer: 2.5,
-            produceTimer: 1.8,
-            upgradeTimer: 16.0,
-            attackWaveThreshold: 7,
+            buildTimer: 2.2,
+            produceTimer: 1.6,
+            upgradeTimer: 15.0,
+            attackWaveThreshold: 6,
             posture: 'EXPANDING'
         },
         team_b: {
             id: 'team_b',
             name: 'ZERG SWARM',
             faction: 'zerg',
-            minerals: 260,
-            gems: 100,
+            minerals: 280,
+            gems: 110,
             techLevel: 1,
             supplyUsed: 0,
-            supplyCap: 24,
+            supplyCap: 28,
             baseAnchor: new THREE.Vector3(),
+            rampDir: new THREE.Vector3(0, 0, 1),
+            rampPos: new THREE.Vector3(),
             rallyPoint: new THREE.Vector3(),
+            platformRadius: 18.0,
             buildOrderIndex: 0,
-            buildTimer: 2.2,
-            produceTimer: 1.6,
+            buildTimer: 2.0,
+            produceTimer: 1.5,
             upgradeTimer: 15.0,
-            attackWaveThreshold: 8,
+            attackWaveThreshold: 6,
             posture: 'EXPANDING'
         }
     },
@@ -8734,8 +8846,8 @@ window.BATTLE_CINEMATIC = {
         return this.setCameraViewMode(mode);
     },
 
-    start(biome) {
-        return this.init(biome);
+    start(biome, factionA, factionB) {
+        return this.init(biome, factionA, factionB);
     },
 
     get simUnits() {
@@ -8776,6 +8888,9 @@ window.BATTLE_CINEMATIC = {
             viewMode: this.cameraViewMode,
             teamA: {
                 name: ta.name,
+                faction: ta.faction,
+                basePos: { x: ta.baseAnchor.x, y: ta.baseAnchor.y, z: ta.baseAnchor.z },
+                rampPos: { x: ta.rampPos.x, y: ta.rampPos.y, z: ta.rampPos.z },
                 minerals: Math.floor(ta.minerals),
                 gems: Math.floor(ta.gems),
                 workers: workersA,
@@ -8786,6 +8901,9 @@ window.BATTLE_CINEMATIC = {
             },
             teamB: {
                 name: tb.name,
+                faction: tb.faction,
+                basePos: { x: tb.baseAnchor.x, y: tb.baseAnchor.y, z: tb.baseAnchor.z },
+                rampPos: { x: tb.rampPos.x, y: tb.rampPos.y, z: tb.rampPos.z },
                 minerals: Math.floor(tb.minerals),
                 gems: Math.floor(tb.gems),
                 workers: workersB,
@@ -8797,21 +8915,40 @@ window.BATTLE_CINEMATIC = {
         };
     },
 
-    snapDryGround(x, z) {
+    resolvePlatformSpot(team, localForward, localRight, fallbackRadius = 14.0) {
         const surfFn = typeof getSurfaceHeightWithBridges === 'function' ? getSurfaceHeightWithBridges : getTerrainHeight;
-        let bx = x, bz = z;
+        const fwdX = team.rampDir.x;
+        const fwdZ = team.rampDir.z;
+        const rightX = -fwdZ;
+        const rightZ = fwdX;
+        const maxR = Math.max(8.0, (team.platformRadius || fallbackRadius) - 3.2);
+        const clampedFwd = THREE.MathUtils.clamp(localForward, -maxR, maxR);
+        const clampedRight = THREE.MathUtils.clamp(localRight, -maxR, maxR);
+        let wx = team.baseAnchor.x + fwdX * clampedFwd + rightX * clampedRight;
+        let wz = team.baseAnchor.z + fwdZ * clampedFwd + rightZ * clampedRight;
+        wx = THREE.MathUtils.clamp(wx, -96, 96);
+        wz = THREE.MathUtils.clamp(wz, -96, 96);
+        const rawY = surfFn(wx, wz);
+        const wy = isFiniteCoord(rawY) ? Math.max(0.05, rawY) : (team.baseAnchor.y || 0.65);
+        return new THREE.Vector3(wx, wy, wz);
+    },
+
+    snapDryGround(x, z, allowPlatform = true) {
+        const surfFn = typeof getSurfaceHeightWithBridges === 'function' ? getSurfaceHeightWithBridges : getTerrainHeight;
+        let bx = isFiniteCoord(x) ? THREE.MathUtils.clamp(x, -98, 98) : 0;
+        let bz = isFiniteCoord(z) ? THREE.MathUtils.clamp(z, -98, 98) : 0;
         const rDist = typeof getRiverDist === 'function' ? getRiverDist(bx, bz) : 99;
-        if (rDist < 5.5) {
-            bz += (bz >= 0 ? 6.5 : -6.5);
+        if (ACTIVE_PLANET_BIOME !== 'ocean' && rDist < 5.0) {
+            bz = THREE.MathUtils.clamp(bz + (bz >= 0 ? 6.0 : -6.0), -98, 98);
         }
-        if (typeof isWalkableGround === 'function') {
+        if (!allowPlatform && typeof isWalkableGround === 'function') {
             for (let rad = 1.5; rad <= 9.0; rad += 1.5) {
-                if (isWalkableGround(bx, bz, 0.8)) break;
+                if (isWalkableGround(bx, bz, 0.6)) break;
                 for (let a = 0; a < 8; a++) {
                     const ang = (a / 8) * Math.PI * 2;
-                    const tx = x + Math.cos(ang) * rad;
-                    const tz = z + Math.sin(ang) * rad;
-                    if (isWalkableGround(tx, tz, 0.8)) {
+                    const tx = THREE.MathUtils.clamp(bx + Math.cos(ang) * rad, -98, 98);
+                    const tz = THREE.MathUtils.clamp(bz + Math.sin(ang) * rad, -98, 98);
+                    if (isWalkableGround(tx, tz, 0.6)) {
                         bx = tx;
                         bz = tz;
                         break;
@@ -8819,7 +8956,8 @@ window.BATTLE_CINEMATIC = {
                 }
             }
         }
-        const y = Math.max(0.05, surfFn(bx, bz));
+        const rawY = surfFn(bx, bz);
+        const y = isFiniteCoord(rawY) ? Math.max(0.05, rawY) : 0.45;
         return new THREE.Vector3(bx, y, bz);
     },
 
@@ -8844,8 +8982,36 @@ window.BATTLE_CINEMATIC = {
         });
     },
 
+    hideSinglePlayerGameplayEntitiesForCinematic() {
+        this._hiddenGameplayMeshes = [];
+        const hideList = (arr) => {
+            if (!Array.isArray(arr)) return;
+            for (let i = 0; i < arr.length; i++) {
+                const item = arr[i];
+                if (item && item.mesh && item.mesh.visible) {
+                    item.mesh.visible = false;
+                    this._hiddenGameplayMeshes.push(item.mesh);
+                }
+            }
+        };
+        hideList(enemyBuildings);
+        hideList(enemies);
+        hideList(solarisBuildings);
+    },
+
+    restoreSinglePlayerGameplayEntitiesAfterCinematic() {
+        if (Array.isArray(this._hiddenGameplayMeshes)) {
+            for (let i = 0; i < this._hiddenGameplayMeshes.length; i++) {
+                const m = this._hiddenGameplayMeshes[i];
+                if (m) m.visible = true;
+            }
+            this._hiddenGameplayMeshes.length = 0;
+        }
+    },
+
     spawnResourcePatch(x, z, kind = 'mineral', amount = 1500) {
-        const pos = this.snapDryGround(x, z);
+        const pos = this.snapDryGround(x, z, true);
+        if (!isFiniteVec3(pos)) return null;
         const nodeGroup = new THREE.Group();
         const crystalMat = kind === 'gem' ? (MAT.amberGlow || MAT.gold) : (MAT.cyanGlow || MAT.crystal);
         const spireCount = kind === 'gem' ? 4 : 5;
@@ -8859,6 +9025,7 @@ window.BATTLE_CINEMATIC = {
             nodeGroup.add(spire);
         }
         nodeGroup.position.copy(pos);
+        tagSceneObjectMetadata(nodeGroup, 'BATTLE_CINEMATIC.spawnResourcePatch', 'battle-cinematic', { role: kind });
         if (this.group) this.group.add(nodeGroup);
         const node = {
             kind,
@@ -8873,16 +9040,23 @@ window.BATTLE_CINEMATIC = {
 
     spawnSpectatorStructure(teamId, role, worldX, worldZ, instant = false) {
         const team = this.teams[teamId];
+        if (!team) return null;
         const faction = team.faction;
-        const pos = this.snapDryGround(worldX, worldZ);
+        const fDef = CINEMATIC_FACTION_DEFS[faction] || CINEMATIC_FACTION_DEFS.terran;
+        const pos = this.snapDryGround(worldX, worldZ, true);
+        if (!isFiniteVec3(pos)) return null;
+
         let mesh;
         if (faction === 'zerg') {
-            const zergKind = role === 'base' ? 'citadel' : (role === 'turret' ? 'spine_turret' : (role === 'factory' ? 'hatchery' : (role === 'airfield' ? 'spire' : 'barracks')));
+            const zergKind = fDef.structures[role] || (role === 'base' ? 'citadel' : (role === 'turret' ? 'spine_turret' : (role === 'factory' ? 'hatchery' : (role === 'airfield' ? 'spire' : 'barracks'))));
             mesh = typeof createOrganicZergStructure === 'function'
                 ? createOrganicZergStructure(zergKind)
-                : createEngineeredBuilding(role === 'factory' ? 'bay' : role, false);
+                : createEngineeredBuilding(role === 'factory' ? 'bay' : 'barracks', false);
+        } else if (faction === 'protoss') {
+            const protossKind = fDef.structures[role] || (role === 'base' ? 'solaris_nexus' : (role === 'pylon' ? 'solaris_pylon' : (role === 'factory' ? 'solaris_robotics' : (role === 'turret' || role === 'airfield' ? 'solaris_spire' : 'solaris_gate'))));
+            mesh = createEngineeredBuilding(protossKind, false);
         } else {
-            const terranKind = role === 'factory' ? 'bay' : (role === 'airfield' ? 'airfield' : role);
+            const terranKind = fDef.structures[role] || (role === 'factory' ? 'bay' : (role === 'airfield' ? 'airfield' : role));
             mesh = createEngineeredBuilding(terranKind, false);
             if (role === 'turret' && mesh.userData && mesh.userData.head && mesh.userData.mounts && typeof createOrdnancePod === 'function') {
                 const head = mesh.userData.head;
@@ -8898,7 +9072,19 @@ window.BATTLE_CINEMATIC = {
                 mesh.userData.mounts.right = pRight;
             }
         }
+
+        const groundY = typeof getTerrainHeight === 'function' ? getTerrainHeight(pos.x, pos.z) : pos.y;
+        pos.y = isFiniteCoord(groundY) ? groundY : pos.y;
         mesh.position.copy(pos);
+        // Orient building toward the team's designated base ramp / battlefield axis
+        const facingYaw = Math.atan2(team.rampDir.x || 0, team.rampDir.z || 1);
+        if (isFiniteCoord(facingYaw)) {
+            mesh.rotation.y = facingYaw;
+        }
+        tagSceneObjectMetadata(mesh, 'BATTLE_CINEMATIC.spawnSpectatorStructure', 'battle-cinematic', {
+            participantId: teamId,
+            role
+        });
         if (this.group) this.group.add(mesh);
 
         const maxHp = role === 'base' ? 3200 : (role === 'turret' ? 1650 : 2100);
@@ -8909,9 +9095,9 @@ window.BATTLE_CINEMATIC = {
             isBuilding: true,
             mesh,
             pos: pos.clone(),
-            hp: instant ? maxHp : Math.round(maxHp * 0.2),
+            hp: instant ? maxHp : Math.round(maxHp * 0.25),
             maxHp,
-            buildProgress: instant ? 1.0 : 0.05,
+            buildProgress: instant ? 1.0 : 0.08,
             buildDuration: role === 'base' ? 14.0 : 8.5,
             cooldown: 0.6 + Math.random() * 0.5,
             productionQueue: [],
@@ -8936,7 +9122,7 @@ window.BATTLE_CINEMATIC = {
     updateStructureConstructionVisuals(bld) {
         if (!bld || !bld.mesh) return;
         const p = Math.max(0.05, Math.min(1.0, bld.buildProgress || 0));
-        if (bld.faction === 'terran') {
+        if (bld.faction === 'terran' || bld.faction === 'protoss') {
             const scaf = bld.mesh.userData && bld.mesh.userData.scaffoldGroup;
             if (scaf) {
                 scaf.visible = p < 0.995;
@@ -8952,19 +9138,32 @@ window.BATTLE_CINEMATIC = {
 
     spawnWorker(teamId, x, z) {
         const team = this.teams[teamId];
-        const pos = this.snapDryGround(x, z);
+        if (!team) return null;
+        const pos = this.snapDryGround(x, z, true);
+        if (!isFiniteVec3(pos)) return null;
+        const droneKind = team.faction === 'zerg' ? 'zerg' : (team.faction === 'protoss' ? 'solaris' : 'terran');
         const mesh = typeof createMiningDroneMesh === 'function'
-            ? createMiningDroneMesh(team.faction === 'zerg' ? 'zerg' : 'terran')
-            : createAnimatedUnitModel(team.faction === 'zerg' ? 'skitterer' : 'medic');
+            ? createMiningDroneMesh(droneKind)
+            : createAnimatedUnitModel(team.faction === 'zerg' ? 'skitterer' : (team.faction === 'protoss' ? 'sentinel' : 'medic'));
         mesh.position.set(pos.x, pos.y + 0.55, pos.z);
+        tagSceneObjectMetadata(mesh, 'BATTLE_CINEMATIC.spawnWorker', 'battle-cinematic', {
+            participantId: teamId,
+            role: 'worker'
+        });
         if (this.group) this.group.add(mesh);
 
         const laserGeo = new THREE.CylinderGeometry(0.035, 0.035, 1.0, 6);
         laserGeo.rotateX(Math.PI / 2);
-        const laserMat = team.faction === 'zerg' ? (MAT.bioGreen || MAT.cyanGlow) : (MAT.cyanGlow || MAT.amberGlow);
+        const laserMat = team.faction === 'zerg'
+            ? (MAT.bioGreen || MAT.cyanGlow)
+            : (team.faction === 'protoss' ? (MAT.amberGlow || MAT.cyanGlow) : (MAT.cyanGlow || MAT.amberGlow));
         const laserMesh = new THREE.Mesh(laserGeo, laserMat);
         laserMesh.visible = false;
-        this.group.add(laserMesh);
+        tagSceneObjectMetadata(laserMesh, 'BATTLE_CINEMATIC.spawnWorkerLaser', 'battle-cinematic', {
+            participantId: teamId,
+            role: 'worker_laser'
+        });
+        if (this.group) this.group.add(laserMesh);
 
         const worker = {
             teamId,
@@ -8975,7 +9174,7 @@ window.BATTLE_CINEMATIC = {
             laserMesh,
             hp: 95,
             maxHp: 95,
-            speed: 3.8,
+            speed: 4.0,
             state: 'TO_NODE', // 'TO_NODE' | 'MINING' | 'TO_BASE'
             targetNode: null,
             mineTimer: 0,
@@ -8986,29 +9185,41 @@ window.BATTLE_CINEMATIC = {
         return worker;
     },
 
-    spawnSimUnit(faction, role, homeX, homeZ) {
-        const teamId = faction === 'zerg' ? 'team_b' : 'team_a';
+    spawnSimUnit(teamIdOrFaction, role, homeX, homeZ) {
+        let teamId = teamIdOrFaction;
+        if (teamId !== 'team_a' && teamId !== 'team_b') {
+            teamId = (this.teams.team_b.faction === teamIdOrFaction) ? 'team_b' : 'team_a';
+        }
         const team = this.teams[teamId];
-        const pos = this.snapDryGround(homeX, homeZ);
-        const isAir = role === 'heli' || role === 'mutalisk';
+        const faction = team ? team.faction : 'terran';
+        const pos = this.snapDryGround(homeX, homeZ, true);
+        if (!isFiniteVec3(pos)) return null;
+
+        const isAir = role === 'heli' || role === 'mutalisk' || role === 'voidray' || role === 'carrier';
         const mesh = createAnimatedUnitModel(role);
         mesh.position.set(pos.x, pos.y + (isAir ? 5.2 : 0), pos.z);
-        mesh.rotation.y = faction === 'terran' ? Math.PI : 0;
+        const facingYaw = Math.atan2(team.rampDir.x || 0, team.rampDir.z || 1);
+        mesh.rotation.y = isFiniteCoord(facingYaw) ? facingYaw : 0;
+        tagSceneObjectMetadata(mesh, 'BATTLE_CINEMATIC.spawnSimUnit', 'battle-cinematic', {
+            participantId: teamId,
+            role
+        });
         if (this.group) this.group.add(mesh);
 
         const techMult = 1.0 + ((team ? team.techLevel : 1) - 1) * 0.14;
-        const isMelee = role === 'skitterer' || role === 'crusher' || role === 'burster';
-        const isTank = role === 'tank' || role === 'siege_tank';
-        const maxHp = Math.round((isTank ? 430 : (role === 'crusher' || role === 'behemoth' ? 350 : 155)) * techMult);
-        const range = isMelee ? 1.95 : (isTank ? 13.8 : (role === 'firebat' ? 5.6 : 10.0));
-        const damage = Math.round((isTank ? 50 : (role === 'crusher' || role === 'behemoth' ? 28 : 17)) * techMult);
-        const fireRate = isTank ? 1.75 : (role === 'ranger' || role === 'grunt' ? 0.55 : 0.90);
-        const speed = isAir ? 5.5 : (isTank ? 2.5 : (isMelee ? 4.5 : 3.35));
+        const isMelee = role === 'skitterer' || role === 'crusher' || role === 'burster' || role === 'zealot';
+        const isTank = role === 'tank' || role === 'siege_tank' || role === 'immortal' || role === 'colossus';
+        const maxHp = Math.round((isTank ? 430 : (role === 'crusher' || role === 'behemoth' || role === 'archon' || role === 'carrier' ? 350 : 165)) * techMult);
+        const range = isMelee ? 2.1 : (isTank ? 14.0 : (role === 'firebat' ? 5.8 : 10.5));
+        const damage = Math.round((isTank ? 52 : (role === 'crusher' || role === 'behemoth' || role === 'archon' || role === 'colossus' ? 32 : 19)) * techMult);
+        const fireRate = isTank ? 1.65 : (role === 'ranger' || role === 'grunt' || role === 'stalker' ? 0.55 : 0.88);
+        const speed = isAir ? 6.2 : (isTank ? 3.2 : (isMelee ? 5.0 : 3.9));
 
         const unit = {
             teamId,
             faction,
             role,
+            type: role,
             mesh,
             isAir,
             isMelee,
@@ -9019,7 +9230,7 @@ window.BATTLE_CINEMATIC = {
             damage,
             fireRate,
             speed,
-            cooldown: Math.random() * 0.6,
+            cooldown: Math.random() * 0.5,
             homePos: pos.clone(),
             aiState: 'RALLYING',
             target: null,
@@ -9052,14 +9263,85 @@ window.BATTLE_CINEMATIC = {
         }, { passive: true });
     },
 
-    init() {
-        if (this.lifecycleState === 'ACTIVE' || this.lifecycleState === 'INITIALIZING') return;
+    computeBasePlatformAndRamp(isTeamA) {
+        const surfFn = typeof getSurfaceHeightWithBridges === 'function' ? getSurfaceHeightWithBridges : getTerrainHeight;
+        const rawAnchor = isTeamA
+            ? (typeof PLAYER_START_POS !== 'undefined' && isFiniteCoord(PLAYER_START_POS.x) ? PLAYER_START_POS : new THREE.Vector3(-62, 0, 62))
+            : (typeof ENEMY_BASE_POS !== 'undefined' && isFiniteCoord(ENEMY_BASE_POS.x) ? ENEMY_BASE_POS : new THREE.Vector3(62, 0, -62));
+        const oppAnchor = isTeamA
+            ? (typeof ENEMY_BASE_POS !== 'undefined' && isFiniteCoord(ENEMY_BASE_POS.x) ? ENEMY_BASE_POS : new THREE.Vector3(62, 0, -62))
+            : (typeof PLAYER_START_POS !== 'undefined' && isFiniteCoord(PLAYER_START_POS.x) ? PLAYER_START_POS : new THREE.Vector3(-62, 0, 62));
+
+        // Find matching zone in BASE_TERRAIN_ZONES if present
+        const zones = Array.isArray(window.BASE_TERRAIN_ZONES) ? window.BASE_TERRAIN_ZONES : [];
+        let matchedZone = null;
+        let minZoneDist = 28.0;
+        for (let i = 0; i < zones.length; i++) {
+            const z = zones[i];
+            if (!z || !isFiniteCoord(z.x) || !isFiniteCoord(z.z)) continue;
+            const d = Math.hypot(z.x - rawAnchor.x, z.z - rawAnchor.z);
+            if (d < minZoneDist) {
+                minZoneDist = d;
+                matchedZone = z;
+            }
+        }
+
+        const baseX = matchedZone ? matchedZone.x : rawAnchor.x;
+        const baseZ = matchedZone ? matchedZone.z : rawAnchor.z;
+        const baseY = surfFn(baseX, baseZ);
+        const baseAnchor = new THREE.Vector3(baseX, isFiniteCoord(baseY) ? baseY : 0.65, baseZ);
+
+        // Determine ramp direction from zone or toward opposing base / battlefield center
+        let rdx = oppAnchor.x - baseX;
+        let rdz = oppAnchor.z - baseZ;
+        if (matchedZone && isFiniteCoord(matchedZone.rampDirX) && isFiniteCoord(matchedZone.rampDirZ)) {
+            rdx = matchedZone.rampDirX;
+            rdz = matchedZone.rampDirZ;
+        } else if (isTeamA && typeof PLAYER_BASE_RAMP_DIR !== 'undefined' && isFiniteCoord(PLAYER_BASE_RAMP_DIR.x) && isFiniteCoord(PLAYER_BASE_RAMP_DIR.z)) {
+            rdx = PLAYER_BASE_RAMP_DIR.x;
+            rdz = PLAYER_BASE_RAMP_DIR.z;
+        }
+        const rLen = Math.hypot(rdx, rdz) || 1.0;
+        const rampDir = new THREE.Vector3(rdx / rLen, 0, rdz / rLen);
+        const platformRadius = matchedZone && isFiniteCoord(matchedZone.radius) ? matchedZone.radius : 19.5;
+
+        const rampDist = platformRadius + 2.5;
+        const rampX = THREE.MathUtils.clamp(baseX + rampDir.x * rampDist, -96, 96);
+        const rampZ = THREE.MathUtils.clamp(baseZ + rampDir.z * rampDist, -96, 96);
+        const rampY = surfFn(rampX, rampZ);
+        const rampPos = new THREE.Vector3(rampX, isFiniteCoord(rampY) ? rampY : baseAnchor.y, rampZ);
+
+        const rallyDist = platformRadius + 10.5;
+        const rallyPoint = this.snapDryGround(
+            baseX + rampDir.x * rallyDist,
+            baseZ + rampDir.z * rallyDist,
+            false
+        );
+
+        return {
+            baseAnchor,
+            rampDir,
+            rampPos,
+            rallyPoint,
+            platformRadius
+        };
+    },
+
+    init(biome, customFactionA = null, customFactionB = null) {
+        if (this.lifecycleState === 'ACTIVE' && this.lastMapSeed === window.MAP_SEED && !customFactionA && !customFactionB) {
+            return;
+        }
+        if (this.lifecycleState === 'INITIALIZING') return;
         if (this.group) {
             this.cleanup();
         }
         this.lifecycleState = 'INITIALIZING';
         this.active = true;
+        this.lastMapSeed = window.MAP_SEED;
         this.bindSpectatorCameraInput();
+
+        // Hide static single-player structures while cinematic runs so opposing base platforms have zero duplicate meshes
+        this.hideSinglePlayerGameplayEntitiesForCinematic();
 
         if (typeof camera !== 'undefined' && camera && typeof controls !== 'undefined' && controls) {
             this.savedGameplayCamPos.copy(camera.position);
@@ -9075,11 +9357,25 @@ window.BATTLE_CINEMATIC = {
 
         this.group = new THREE.Group();
         this.group.name = 'BattleCinematicTheatre';
+        tagSceneObjectMetadata(this.group, 'BATTLE_CINEMATIC.init', 'battle-cinematic');
         scene.add(this.group);
 
+        // Select two distinct factions from available faction definitions ('terran', 'protoss', 'zerg')
+        const factionKeys = Object.keys(CINEMATIC_FACTION_DEFS);
+        const seedOffset = Math.abs(Math.floor(Number(window.MAP_SEED || 100) + (this.matchNumber || 1) * 7));
+        const facA = (customFactionA && CINEMATIC_FACTION_DEFS[customFactionA])
+            ? customFactionA
+            : factionKeys[seedOffset % factionKeys.length];
+        let facB = (customFactionB && CINEMATIC_FACTION_DEFS[customFactionB] && customFactionB !== facA)
+            ? customFactionB
+            : factionKeys[(seedOffset + 1 + (this.matchNumber % 2)) % factionKeys.length];
+        if (facB === facA) {
+            facB = factionKeys.find(k => k !== facA) || 'zerg';
+        }
+        const defA = CINEMATIC_FACTION_DEFS[facA];
+        const defB = CINEMATIC_FACTION_DEFS[facB];
+
         this.anchor = findDryCinematicBattlefieldCenter();
-        const ax = this.anchor.x;
-        const az = this.anchor.z;
         this.focusImpactPos.copy(this.anchor);
 
         this.actors.buildings = [];
@@ -9098,78 +9394,120 @@ window.BATTLE_CINEMATIC = {
         this.matchWinner = null;
         this.victoryResetTimer = 0;
 
-        // Configure Team A (Southern Ridge) & Team B (Northern Basin)
+        // Place Team A & Team B on the actual generated opposing base platforms and align with their designated base ramps
+        const platA = this.computeBasePlatformAndRamp(true);
         const ta = this.teams.team_a;
-        ta.minerals = 280;
-        ta.gems = 110;
+        ta.faction = defA.id;
+        ta.name = defA.name;
+        ta.minerals = 320;
+        ta.gems = 130;
         ta.techLevel = 1;
         ta.buildOrderIndex = 0;
         ta.buildTimer = 1.8;
         ta.produceTimer = 1.5;
         ta.upgradeTimer = 14.0;
         ta.posture = 'HARVESTING & BUILDING';
-        ta.baseAnchor.copy(this.snapDryGround(ax - 5.5, az + 15.0));
-        ta.rallyPoint.copy(this.snapDryGround(ax - 1.5, az + 7.2));
+        ta.baseAnchor.copy(platA.baseAnchor);
+        ta.rampDir.copy(platA.rampDir);
+        ta.rampPos.copy(platA.rampPos);
+        ta.rallyPoint.copy(platA.rallyPoint);
+        ta.platformRadius = platA.platformRadius;
 
+        const platB = this.computeBasePlatformAndRamp(false);
         const tb = this.teams.team_b;
-        tb.minerals = 280;
-        tb.gems = 110;
+        tb.faction = defB.id;
+        tb.name = defB.name;
+        tb.minerals = 320;
+        tb.gems = 130;
         tb.techLevel = 1;
         tb.buildOrderIndex = 0;
         tb.buildTimer = 1.6;
         tb.produceTimer = 1.4;
         tb.upgradeTimer = 14.0;
-        tb.posture = 'HARVESTING & GESTATING';
-        tb.baseAnchor.copy(this.snapDryGround(ax + 4.5, az - 15.0));
-        tb.rallyPoint.copy(this.snapDryGround(ax + 1.2, az - 7.2));
+        tb.posture = 'HARVESTING & BUILDING';
+        tb.baseAnchor.copy(platB.baseAnchor);
+        tb.rampDir.copy(platB.rampDir);
+        tb.rampPos.copy(platB.rampPos);
+        tb.rallyPoint.copy(platB.rallyPoint);
+        tb.platformRadius = platB.platformRadius;
 
-        // Resource nodes for Team A, Team B, and contested center expansion
-        this.spawnResourcePatch(ta.baseAnchor.x - 4.8, ta.baseAnchor.z + 2.6, 'mineral', 1800);
-        this.spawnResourcePatch(ta.baseAnchor.x - 2.6, ta.baseAnchor.z + 4.2, 'mineral', 1800);
-        this.spawnResourcePatch(ta.baseAnchor.x + 4.2, ta.baseAnchor.z + 3.4, 'gem', 1200);
+        // Spawn Mineral & Gem Patches behind each HQ on the base platform (away from the ramp)
+        const resA1 = this.resolvePlatformSpot(ta, -6.2, -4.5);
+        const resA2 = this.resolvePlatformSpot(ta, -6.8,  0.0);
+        const resA3 = this.resolvePlatformSpot(ta, -6.2,  4.8);
+        this.spawnResourcePatch(resA1.x, resA1.z, 'mineral', 2200);
+        this.spawnResourcePatch(resA2.x, resA2.z, 'mineral', 2200);
+        this.spawnResourcePatch(resA3.x, resA3.z, 'gem', 1500);
 
-        this.spawnResourcePatch(tb.baseAnchor.x + 4.8, tb.baseAnchor.z - 2.6, 'mineral', 1800);
-        this.spawnResourcePatch(tb.baseAnchor.x + 2.6, tb.baseAnchor.z - 4.2, 'mineral', 1800);
-        this.spawnResourcePatch(tb.baseAnchor.x - 4.2, tb.baseAnchor.z - 3.4, 'gem', 1200);
+        const resB1 = this.resolvePlatformSpot(tb, -6.2, -4.5);
+        const resB2 = this.resolvePlatformSpot(tb, -6.8,  0.0);
+        const resB3 = this.resolvePlatformSpot(tb, -6.2,  4.8);
+        this.spawnResourcePatch(resB1.x, resB1.z, 'mineral', 2200);
+        this.spawnResourcePatch(resB2.x, resB2.z, 'mineral', 2200);
+        this.spawnResourcePatch(resB3.x, resB3.z, 'gem', 1500);
 
-        this.spawnResourcePatch(ax - 8.5, az, 'mineral', 2200);
-        this.spawnResourcePatch(ax + 8.5, az, 'gem', 1500);
+        // Starting Command Structures + initial production & ramp-defense buildings on each base platform
+        const hqA = this.spawnSpectatorStructure('team_a', 'base', ta.baseAnchor.x, ta.baseAnchor.z, true);
+        ta.hqBuilding = hqA;
+        if (ta.faction === 'protoss') {
+            const pylA = this.resolvePlatformSpot(ta, 3.8, -5.2);
+            this.spawnSpectatorStructure('team_a', 'pylon', pylA.x, pylA.z, true);
+        }
+        const barA = this.resolvePlatformSpot(ta, 5.2, -5.8);
+        const turA = this.resolvePlatformSpot(ta, 8.8,  3.2);
+        this.spawnSpectatorStructure('team_a', 'barracks', barA.x, barA.z, true);
+        this.spawnSpectatorStructure('team_a', 'turret', turA.x, turA.z, false);
 
-        // Starting Command Structures + initial production buildings
-        this.spawnSpectatorStructure('team_a', 'base', ta.baseAnchor.x, ta.baseAnchor.z, true);
-        this.spawnSpectatorStructure('team_a', 'barracks', ta.baseAnchor.x + 5.2, ta.baseAnchor.z - 2.2, true);
-        this.spawnSpectatorStructure('team_a', 'turret', ta.baseAnchor.x - 1.8, ta.baseAnchor.z - 4.8, false);
+        const hqB = this.spawnSpectatorStructure('team_b', 'base', tb.baseAnchor.x, tb.baseAnchor.z, true);
+        tb.hqBuilding = hqB;
+        if (tb.faction === 'protoss') {
+            const pylB = this.resolvePlatformSpot(tb, 3.8, -5.2);
+            this.spawnSpectatorStructure('team_b', 'pylon', pylB.x, pylB.z, true);
+        }
+        const barB = this.resolvePlatformSpot(tb, 5.2, -5.8);
+        const turB = this.resolvePlatformSpot(tb, 8.8,  3.2);
+        this.spawnSpectatorStructure('team_b', 'barracks', barB.x, barB.z, true);
+        this.spawnSpectatorStructure('team_b', 'turret', turB.x, turB.z, false);
 
-        this.spawnSpectatorStructure('team_b', 'base', tb.baseAnchor.x, tb.baseAnchor.z, true);
-        this.spawnSpectatorStructure('team_b', 'barracks', tb.baseAnchor.x - 5.2, tb.baseAnchor.z + 2.2, true);
-        this.spawnSpectatorStructure('team_b', 'turret', tb.baseAnchor.x + 1.8, tb.baseAnchor.z + 4.8, false);
-
-        // Starting Workers (3 per team)
-        for (let i = 0; i < 3; i++) {
-            this.spawnWorker('team_a', ta.baseAnchor.x - 2.0 + i * 1.4, ta.baseAnchor.z + 1.5);
-            this.spawnWorker('team_b', tb.baseAnchor.x - 2.0 + i * 1.4, tb.baseAnchor.z - 1.5);
+        // Starting Workers (4 per team harvesting between HQ and platform resource patches)
+        for (let i = 0; i < 4; i++) {
+            const wPosA = this.resolvePlatformSpot(ta, -3.2, -2.4 + i * 1.6);
+            const wPosB = this.resolvePlatformSpot(tb, -3.2, -2.4 + i * 1.6);
+            this.spawnWorker('team_a', wPosA.x, wPosA.z);
+            this.spawnWorker('team_b', wPosB.x, wPosB.z);
         }
 
-        // Initial Vanguard Patrols (built from starting resources)
-        const startRolesA = ['grunt', 'ranger', 'marauder', 'firebat', 'tank'];
-        for (let i = 0; i < startRolesA.length; i++) {
-            this.spawnSimUnit('terran', startRolesA[i], ta.rallyPoint.x - 3.6 + i * 1.8, ta.rallyPoint.z + (i % 2) * 1.4);
+        // Initial Vanguard Squads positioned near each team's base ramp / rally point
+        for (let i = 0; i < defA.vanguard.length; i++) {
+            const uSpotA = this.resolvePlatformSpot(ta, 7.5 + (i % 2) * 2.0, -3.6 + i * 1.8);
+            this.spawnSimUnit('team_a', defA.vanguard[i], uSpotA.x, uSpotA.z);
         }
-        const startRolesB = ['skitterer', 'skitterer', 'spitter', 'crusher', 'spitter', 'behemoth'];
-        for (let i = 0; i < startRolesB.length; i++) {
-            this.spawnSimUnit('zerg', startRolesB[i], tb.rallyPoint.x - 3.8 + i * 1.6, tb.rallyPoint.z - (i % 2) * 1.4);
+        for (let i = 0; i < defB.vanguard.length; i++) {
+            const uSpotB = this.resolvePlatformSpot(tb, 7.5 + (i % 2) * 2.0, -3.6 + i * 1.8);
+            this.spawnSimUnit('team_b', defB.vanguard[i], uSpotB.x, uSpotB.z);
         }
 
-        this.camPosSmooth.set(ax + 26, this.anchor.y + 24, az + 28);
-        this.camLookSmooth.set(ax, this.anchor.y + 1.2, az);
+        this.teamA = ta;
+        this.teamB = tb;
+        this.unitsA = this.actors.infantry;
+        this.unitsB = this.actors.enemies;
+        this.buildings = this.actors.buildings;
+        ta.workers = this.actors.workers.filter(w => w && w.teamId === 'team_a');
+        tb.workers = this.actors.workers.filter(w => w && w.teamId === 'team_b');
+        ta.buildings = this.actors.buildings.filter(b => b && b.teamId === 'team_a');
+        tb.buildings = this.actors.buildings.filter(b => b && b.teamId === 'team_b');
+
+        this.camPosSmooth.set(ta.baseAnchor.x + ta.rampDir.x * 22.0 + 16.0, ta.baseAnchor.y + 22.0, ta.baseAnchor.z + ta.rampDir.z * 22.0 + 16.0);
+        this.camLookSmooth.copy(ta.rampPos);
         this.initialized = true;
         this.lifecycleState = 'ACTIVE';
     },
 
     spawnSimProjectile(fromPos, targetActor, wType, damage, faction) {
         if (this.lifecycleState !== 'ACTIVE' || !this.group || !targetActor) return;
+        if (!isFiniteVec3(fromPos)) return;
         const tPos = targetActor.mesh ? targetActor.mesh.position : targetActor.pos;
-        if (!tPos) return;
+        if (!isFiniteVec3(tPos)) return;
         const endPos = tPos.clone();
         endPos.y += targetActor.isAir ? 0.0 : 0.85;
         let mesh;
@@ -9188,6 +9526,7 @@ window.BATTLE_CINEMATIC = {
         }
         mesh.position.copy(fromPos);
         mesh.lookAt(endPos);
+        tagSceneObjectMetadata(mesh, 'BATTLE_CINEMATIC.spawnSimProjectile', 'battle-cinematic', { role: wType });
         this.group.add(mesh);
         this.actors.projectiles.push({
             mesh,
@@ -9234,6 +9573,19 @@ window.BATTLE_CINEMATIC = {
             this.actors.tank = null;
             this.actors.tank2 = null;
         }
+        if (this.teams && this.teams.team_a) {
+            this.teams.team_a.workers = [];
+            this.teams.team_a.buildings = [];
+            this.teams.team_a.hqBuilding = null;
+        }
+        if (this.teams && this.teams.team_b) {
+            this.teams.team_b.workers = [];
+            this.teams.team_b.buildings = [];
+            this.teams.team_b.hqBuilding = null;
+        }
+        this.unitsA = this.actors ? this.actors.infantry : [];
+        this.unitsB = this.actors ? this.actors.enemies : [];
+        this.buildings = this.actors ? this.actors.buildings : [];
 
         if (this.group) {
             this.group.visible = false;
@@ -9248,6 +9600,9 @@ window.BATTLE_CINEMATIC = {
             this.disposeCinematicMeshTree(lingeringGroup);
         }
 
+        // Restore single-player gameplay structures when leaving the title screen cinematic
+        this.restoreSinglePlayerGameplayEntitiesAfterCinematic();
+
         for (let i = projectiles.length - 1; i >= 0; i--) {
             if (projectiles[i] && projectiles[i].mesh) scene.remove(projectiles[i].mesh);
         }
@@ -9261,13 +9616,14 @@ window.BATTLE_CINEMATIC = {
             const focusAnchor = (state && state.baseBuilding && state.baseBuilding.pos)
                 ? state.baseBuilding.pos
                 : (typeof PLAYER_START_POS !== 'undefined' ? PLAYER_START_POS : null);
-            if (focusAnchor) {
+            if (focusAnchor && isFiniteCoord(focusAnchor.x) && isFiniteCoord(focusAnchor.z)) {
                 const gy = typeof getSurfaceHeightWithBridges === 'function'
                     ? getSurfaceHeightWithBridges(focusAnchor.x, focusAnchor.z)
                     : (focusAnchor.y || 0);
-                controls.target.set(focusAnchor.x, gy, focusAnchor.z);
-                camera.position.set(focusAnchor.x, gy + 24, focusAnchor.z + 24);
-            } else if (this.hasSavedGameplayCam) {
+                const safeGy = isFiniteCoord(gy) ? gy : 0;
+                controls.target.set(focusAnchor.x, safeGy, focusAnchor.z);
+                camera.position.set(focusAnchor.x, safeGy + 24, focusAnchor.z + 24);
+            } else if (this.hasSavedGameplayCam && isFiniteVec3(this.savedGameplayCamPos) && isFiniteVec3(this.savedGameplayCamTarget)) {
                 camera.position.copy(this.savedGameplayCamPos);
                 controls.target.copy(this.savedGameplayCamTarget);
             }
@@ -9282,6 +9638,7 @@ window.BATTLE_CINEMATIC = {
         this.time = 0;
         this.elapsed = 0;
         this.matchNumber++;
+        this.lastMapSeed = null;
         this.cleanup();
         this.init();
         if (window.SFX) window.SFX.playClick();
@@ -9297,7 +9654,7 @@ window.BATTLE_CINEMATIC = {
         const surfFn = typeof getSurfaceHeightWithBridges === 'function' ? getSurfaceHeightWithBridges : getTerrainHeight;
         for (let i = this.actors.workers.length - 1; i >= 0; i--) {
             const w = this.actors.workers[i];
-            if (!w || !w.mesh || w.hp <= 0) {
+            if (!w || !w.mesh || w.hp <= 0 || !isFiniteVec3(w.mesh.position)) {
                 if (w && w.laserMesh && w.laserMesh.parent) w.laserMesh.parent.remove(w.laserMesh);
                 if (w && w.mesh && w.mesh.parent) w.mesh.parent.remove(w.mesh);
                 this.actors.workers.splice(i, 1);
@@ -9306,15 +9663,15 @@ window.BATTLE_CINEMATIC = {
             const team = this.teams[w.teamId];
             const homeBase = this.actors.buildings.find(b => b && b.teamId === w.teamId && b.role === 'base' && b.hp > 0)
                 || this.actors.buildings.find(b => b && b.teamId === w.teamId && b.hp > 0);
-            if (!homeBase) continue;
+            if (!homeBase || !isFiniteVec3(homeBase.pos)) continue;
 
-            if (!w.targetNode || w.targetNode.amount <= 0) {
+            if (!w.targetNode || w.targetNode.amount <= 0 || !isFiniteVec3(w.targetNode.pos)) {
                 let bestNode = null;
                 let bestDist = Infinity;
                 const preferGem = (i % 3 === 2);
                 for (let n = 0; n < this.actors.resourceNodes.length; n++) {
                     const nd = this.actors.resourceNodes[n];
-                    if (!nd || nd.amount <= 0) continue;
+                    if (!nd || nd.amount <= 0 || !isFiniteVec3(nd.pos)) continue;
                     let d = nd.pos.distanceTo(homeBase.pos);
                     if (preferGem && nd.kind === 'gem') d *= 0.65;
                     if (d < bestDist) {
@@ -9333,11 +9690,14 @@ window.BATTLE_CINEMATIC = {
                 if (dist <= 1.65) {
                     w.state = 'MINING';
                     w.mineTimer = 1.8;
-                } else {
-                    w.mesh.position.x += (dx / dist) * w.speed * dt;
-                    w.mesh.position.z += (dz / dist) * w.speed * dt;
-                    w.mesh.position.y = surfFn(w.mesh.position.x, w.mesh.position.z) + 0.55 + Math.sin(this.time * 5 + i) * 0.08;
-                    w.mesh.rotation.y = Math.atan2(dx, dz);
+                } else if (dist > 0.001) {
+                    const nx = w.mesh.position.x + (dx / dist) * w.speed * dt;
+                    const nz = w.mesh.position.z + (dz / dist) * w.speed * dt;
+                    const ny = surfFn(nx, nz);
+                    if (isFiniteCoord(nx) && isFiniteCoord(nz) && isFiniteCoord(ny)) {
+                        w.mesh.position.set(nx, ny + 0.55 + Math.sin(this.time * 5 + i) * 0.08, nz);
+                        w.mesh.rotation.y = Math.atan2(dx, dz);
+                    }
                 }
             } else if (w.state === 'MINING' && w.targetNode) {
                 w.mineTimer -= dt;
@@ -9366,11 +9726,14 @@ window.BATTLE_CINEMATIC = {
                     else team.minerals += w.cargoAmount;
                     w.cargoAmount = 0;
                     w.state = 'TO_NODE';
-                } else {
-                    w.mesh.position.x += (dx / dist) * w.speed * dt;
-                    w.mesh.position.z += (dz / dist) * w.speed * dt;
-                    w.mesh.position.y = surfFn(w.mesh.position.x, w.mesh.position.z) + 0.55;
-                    w.mesh.rotation.y = Math.atan2(dx, dz);
+                } else if (dist > 0.001) {
+                    const nx = w.mesh.position.x + (dx / dist) * w.speed * dt;
+                    const nz = w.mesh.position.z + (dz / dist) * w.speed * dt;
+                    const ny = surfFn(nx, nz);
+                    if (isFiniteCoord(nx) && isFiniteCoord(nz) && isFiniteCoord(ny)) {
+                        w.mesh.position.set(nx, ny + 0.55, nz);
+                        w.mesh.rotation.y = Math.atan2(dx, dz);
+                    }
                 }
             }
         }
@@ -9378,12 +9741,16 @@ window.BATTLE_CINEMATIC = {
 
     updateAICommander(teamId, dt) {
         const team = this.teams[teamId];
+        if (!team) return;
+        const fDef = CINEMATIC_FACTION_DEFS[team.faction] || CINEMATIC_FACTION_DEFS.terran;
         const myBlds = this.actors.buildings.filter(b => b && b.teamId === teamId && b.hp > 0);
         const myWorkers = this.actors.workers.filter(w => w && w.teamId === teamId && w.hp > 0);
         const myArmy = teamId === 'team_a'
             ? this.actors.infantry.filter(u => u && u.hp > 0)
             : this.actors.enemies.filter(u => u && u.hp > 0);
 
+        team.workers = myWorkers;
+        team.buildings = myBlds;
         team.supplyUsed = myWorkers.length + myArmy.length;
 
         // 1. Progress active building construction
@@ -9399,20 +9766,20 @@ window.BATTLE_CINEMATIC = {
         // 2. Replace lost workers (up to 4)
         if (myWorkers.length < 4 && team.minerals >= 50 && myBlds.length > 0) {
             team.minerals -= 50;
-            const anchor = myBlds[0].pos;
-            this.spawnWorker(teamId, anchor.x + (Math.random() - 0.5) * 3.0, anchor.z + (Math.random() - 0.5) * 3.0);
+            const wSpot = this.resolvePlatformSpot(team, -2.8, (Math.random() - 0.5) * 4.0);
+            this.spawnWorker(teamId, wSpot.x, wSpot.z);
         }
 
-        // 3. Autonomous base expansion & tech tree construction
+        // 3. Autonomous base expansion & tech tree construction on the base platform oriented toward the ramp
         team.buildTimer -= dt;
         if (team.buildTimer <= 0) {
             team.buildTimer = 4.2;
             const buildPlan = [
-                { role: 'factory', costM: 140, costG: 50, dx: -5.4, dz: teamId === 'team_a' ? -2.4 : 2.4 },
-                { role: 'turret',  costM: 95,  costG: 20, dx: 3.4,  dz: teamId === 'team_a' ? -5.0 : 5.0 },
-                { role: 'airfield',costM: 150, costG: 75, dx: 0.0,  dz: teamId === 'team_a' ? 4.2 : -4.2 },
-                { role: 'barracks',costM: 120, costG: 25, dx: 6.5,  dz: teamId === 'team_a' ? 1.5 : -1.5 },
-                { role: 'turret',  costM: 95,  costG: 20, dx: -4.2, dz: teamId === 'team_a' ? -6.2 : 6.2 }
+                { role: 'factory',  costM: 140, costG: 50, fwd: 4.5,  right:  6.2 },
+                { role: 'turret',   costM: 95,  costG: 20, fwd: 9.2,  right: -3.6 },
+                { role: 'airfield', costM: 150, costG: 75, fwd: -1.8, right:  6.8 },
+                { role: 'barracks', costM: 120, costG: 25, fwd: 2.2,  right: -7.2 },
+                { role: 'turret',   costM: 95,  costG: 20, fwd: 10.2, right:  0.0 }
             ];
             for (let p = 0; p < buildPlan.length; p++) {
                 const slot = buildPlan[(team.buildOrderIndex + p) % buildPlan.length];
@@ -9422,11 +9789,12 @@ window.BATTLE_CINEMATIC = {
                     team.minerals -= slot.costM;
                     team.gems -= slot.costG;
                     team.buildOrderIndex = (team.buildOrderIndex + 1) % buildPlan.length;
+                    const bSpot = this.resolvePlatformSpot(team, slot.fwd, slot.right);
                     this.spawnSpectatorStructure(
                         teamId,
                         slot.role,
-                        team.baseAnchor.x + slot.dx,
-                        team.baseAnchor.z + slot.dz,
+                        bSpot.x,
+                        bSpot.z,
                         false
                     );
                     break;
@@ -9440,46 +9808,35 @@ window.BATTLE_CINEMATIC = {
             team.minerals -= 150;
             team.gems -= 80;
             team.techLevel++;
-            team.upgradeTimer = 22.0;
+            team.upgradeTimer = 20.0;
         }
 
-        // 5. Autonomous unit production from completed production structures
+        // 5. Autonomous unit production from completed production structures using the team's faction roster
         team.produceTimer -= dt;
         if (team.produceTimer <= 0 && myArmy.length < 18) {
-            team.produceTimer = 2.6;
+            team.produceTimer = 2.4;
             const prodBlds = myBlds.filter(b => b.buildProgress >= 0.99 && (b.role === 'barracks' || b.role === 'factory' || b.role === 'airfield' || b.role === 'base'));
             if (prodBlds.length > 0 && team.minerals >= 65) {
                 const spawner = prodBlds[Math.floor(Math.random() * prodBlds.length)];
                 let unitRole;
                 let costM = 65;
-                let costG = 0;
-                if (team.faction === 'terran') {
-                    if (spawner.role === 'airfield' && team.gems >= 45) {
-                        unitRole = 'heli'; costM = 110; costG = 45;
-                    } else if (spawner.role === 'factory' && team.gems >= 35) {
-                        unitRole = 'tank'; costM = 120; costG = 35;
-                    } else {
-                        const infPool = ['grunt', 'ranger', 'marauder', 'firebat', 'rocketman'];
-                        unitRole = infPool[Math.floor(Math.random() * infPool.length)];
-                        costM = 70; costG = 15;
-                    }
+                let costG = 10;
+                if (spawner.role === 'airfield' && team.gems >= 40 && fDef.airPool.length > 0) {
+                    unitRole = fDef.airPool[Math.floor(Math.random() * fDef.airPool.length)];
+                    costM = 110; costG = 40;
+                } else if (spawner.role === 'factory' && team.gems >= 30 && fDef.heavyPool.length > 0) {
+                    unitRole = fDef.heavyPool[Math.floor(Math.random() * fDef.heavyPool.length)];
+                    costM = 115; costG = 35;
                 } else {
-                    if (spawner.role === 'airfield' && team.gems >= 40) {
-                        unitRole = 'mutalisk'; costM = 100; costG = 40;
-                    } else if (spawner.role === 'factory' && team.gems >= 30) {
-                        unitRole = Math.random() > 0.45 ? 'crusher' : 'behemoth'; costM = 115; costG = 30;
-                    } else {
-                        const zergPool = ['skitterer', 'skitterer', 'spitter', 'burster', 'spitter'];
-                        unitRole = zergPool[Math.floor(Math.random() * zergPool.length)];
-                        costM = 65; costG = 10;
-                    }
+                    unitRole = fDef.infantryPool[Math.floor(Math.random() * fDef.infantryPool.length)];
+                    costM = 65; costG = 10;
                 }
                 if (team.minerals >= costM && team.gems >= costG) {
                     team.minerals -= costM;
                     team.gems -= costG;
-                    const sx = spawner.pos.x + (Math.random() - 0.5) * 3.2;
-                    const sz = spawner.pos.z + (teamId === 'team_a' ? -2.4 : 2.4);
-                    this.spawnSimUnit(team.faction, unitRole, sx, sz);
+                    const sx = spawner.pos.x + team.rampDir.x * 2.8 + (Math.random() - 0.5) * 2.4;
+                    const sz = spawner.pos.z + team.rampDir.z * 2.8 + (Math.random() - 0.5) * 2.4;
+                    this.spawnSimUnit(teamId, unitRole, sx, sz);
                 }
             }
         }
@@ -9489,7 +9846,7 @@ window.BATTLE_CINEMATIC = {
         let enemyNearBase = false;
         for (let e = 0; e < enemyPool.length; e++) {
             const eu = enemyPool[e];
-            if (eu && eu.hp > 0 && eu.mesh && eu.mesh.position.distanceTo(team.baseAnchor) < 16.0) {
+            if (eu && eu.hp > 0 && eu.mesh && isFiniteVec3(eu.mesh.position) && eu.mesh.position.distanceTo(team.baseAnchor) < 22.0) {
                 enemyNearBase = true;
                 break;
             }
@@ -9510,8 +9867,8 @@ window.BATTLE_CINEMATIC = {
             }
             return;
         }
-        if (this.lifecycleState !== 'ACTIVE') {
-            if (this.lifecycleState === 'UNINITIALIZED' || this.lifecycleState === 'DISPOSED' || !this.initialized) {
+        if (this.lifecycleState !== 'ACTIVE' || this.lastMapSeed !== window.MAP_SEED) {
+            if (this.lifecycleState === 'UNINITIALIZED' || this.lifecycleState === 'DISPOSED' || !this.initialized || this.lastMapSeed !== window.MAP_SEED) {
                 this.init();
             }
             if (this.lifecycleState !== 'ACTIVE') return;
@@ -9535,11 +9892,13 @@ window.BATTLE_CINEMATIC = {
             }
         }
 
-        // Check win/loss condition (neither team is invulnerable)
+        // Check win/loss condition (only resets when an entire base is actually destroyed)
         const aliveBldsA = this.actors.buildings.filter(b => b && b.teamId === 'team_a' && b.hp > 0);
         const aliveBldsB = this.actors.buildings.filter(b => b && b.teamId === 'team_b' && b.hp > 0);
         if ((aliveBldsA.length === 0 || aliveBldsB.length === 0) && !this.matchWinner) {
-            this.matchWinner = aliveBldsA.length > 0 ? 'TERRAN DOMINION VICTORY' : 'ZERG SWARM VICTORY';
+            this.matchWinner = aliveBldsA.length > 0
+                ? `${this.teams.team_a.name} VICTORY`
+                : `${this.teams.team_b.name} VICTORY`;
             this.victoryResetTimer = 5.0;
         }
         if (this.matchWinner) {
@@ -9559,7 +9918,7 @@ window.BATTLE_CINEMATIC = {
         for (let i = this.actors.buildings.length - 1; i >= 0; i--) {
             const b = this.actors.buildings[i];
             if (!b || b.hp <= 0) {
-                if (b && b.pos) {
+                if (b && isFiniteVec3(b.pos)) {
                     if (typeof spawnVolumetricFireball === 'function') spawnVolumetricFireball(b.pos, 2.2);
                     else if (typeof triggerExplosion === 'function') triggerExplosion(b.pos, 2.0);
                     if (typeof spawnShockwaveRing === 'function') spawnShockwaveRing(b.pos, 4.5, 0xff6b35);
@@ -9572,20 +9931,20 @@ window.BATTLE_CINEMATIC = {
             }
         }
 
-        const terranStructures = this.actors.buildings.filter(b => b && b.teamId === 'team_a' && b.hp > 0);
-        const zergStructures = this.actors.buildings.filter(b => b && b.teamId === 'team_b' && b.hp > 0);
+        const teamAStructures = this.actors.buildings.filter(b => b && b.teamId === 'team_a' && b.hp > 0);
+        const teamBStructures = this.actors.buildings.filter(b => b && b.teamId === 'team_b' && b.hp > 0);
 
         // 3. Defensive Turret & Spine Crawler Targeting
         for (let i = 0; i < this.actors.buildings.length; i++) {
             const bld = this.actors.buildings[i];
-            if (!bld || bld.role !== 'turret' || bld.buildProgress < 0.99 || bld.hp <= 0) continue;
+            if (!bld || bld.role !== 'turret' || bld.buildProgress < 0.99 || bld.hp <= 0 || !isFiniteVec3(bld.pos)) continue;
             bld.cooldown -= dt;
             const enemyUnits = bld.teamId === 'team_a' ? this.actors.enemies : this.actors.infantry;
             let nearest = null;
-            let minDist = 17.5;
+            let minDist = 18.0;
             for (let e = 0; e < enemyUnits.length; e++) {
                 const eu = enemyUnits[e];
-                if (!eu || eu.hp <= 0 || !eu.mesh) continue;
+                if (!eu || eu.hp <= 0 || !eu.mesh || !isFiniteVec3(eu.mesh.position)) continue;
                 const d = eu.mesh.position.distanceTo(bld.pos);
                 if (d < minDist) { minDist = d; nearest = eu; }
             }
@@ -9595,9 +9954,9 @@ window.BATTLE_CINEMATIC = {
                 bld.mesh.userData.head.rotation.y = Math.atan2(dx, dz);
             }
             if (nearest && bld.cooldown <= 0) {
-                bld.cooldown = bld.faction === 'terran' ? 0.55 : 0.78;
+                bld.cooldown = bld.faction === 'terran' ? 0.55 : 0.72;
                 const muzzle = bld.pos.clone().add(new THREE.Vector3(0, 1.95, 0));
-                this.spawnSimProjectile(muzzle, nearest, bld.faction === 'terran' ? 'plasma' : 'spit', 26, bld.faction);
+                this.spawnSimProjectile(muzzle, nearest, bld.faction === 'zerg' ? 'spit' : 'plasma', 26, bld.faction);
             }
         }
 
@@ -9606,9 +9965,11 @@ window.BATTLE_CINEMATIC = {
         const stepArmyList = (armyList, enemyUnits, enemyBlds, myTeam) => {
             for (let i = armyList.length - 1; i >= 0; i--) {
                 const u = armyList[i];
-                if (!u || !u.mesh || u.hp <= 0) {
+                if (!u || !u.mesh || u.hp <= 0 || !isFiniteVec3(u.mesh.position)) {
                     if (u && u.mesh) {
-                        if (typeof triggerExplosion === 'function') triggerExplosion(u.mesh.position, u.isTank ? 1.5 : 0.85);
+                        if (isFiniteVec3(u.mesh.position) && typeof triggerExplosion === 'function') {
+                            triggerExplosion(u.mesh.position, u.isTank ? 1.5 : 0.85);
+                        }
                         if (u.mesh.parent) u.mesh.parent.remove(u.mesh);
                         this.disposeCinematicMeshTree(u.mesh);
                     }
@@ -9621,39 +9982,41 @@ window.BATTLE_CINEMATIC = {
                 let bestScore = Infinity;
                 for (let e = 0; e < enemyUnits.length; e++) {
                     const eu = enemyUnits[e];
-                    if (!eu || eu.hp <= 0 || !eu.mesh) continue;
+                    if (!eu || eu.hp <= 0 || !eu.mesh || !isFiniteVec3(eu.mesh.position)) continue;
                     const d = u.mesh.position.distanceTo(eu.mesh.position);
                     const score = d - (eu.hp < eu.maxHp * 0.35 ? 2.5 : 0);
                     if (score < bestScore) { bestScore = score; bestTarget = eu; }
                 }
                 for (let b = 0; b < enemyBlds.length; b++) {
                     const eb = enemyBlds[b];
-                    if (!eb || eb.hp <= 0) continue;
+                    if (!eb || eb.hp <= 0 || !isFiniteVec3(eb.pos)) continue;
                     const d = u.mesh.position.distanceTo(eb.pos) + 2.0;
                     if (d < bestScore) { bestScore = d; bestTarget = eb; }
                 }
 
                 // Determine tactical move destination
                 let goalPos = myTeam.rallyPoint;
-                const isRetreating = !u.isMelee && !u.isTank && u.hp < u.maxHp * 0.25;
+                const isRetreating = !u.isMelee && !u.isTank && u.hp < u.maxHp * 0.22;
                 if (isRetreating) {
                     goalPos = myTeam.baseAnchor;
                 } else if (myTeam.posture === 'DEFENDING BASE' && bestTarget) {
                     goalPos = bestTarget.mesh ? bestTarget.mesh.position : bestTarget.pos;
                 } else if (myTeam.posture === 'FULL ASSAULT' && bestTarget) {
                     goalPos = bestTarget.mesh ? bestTarget.mesh.position : bestTarget.pos;
-                } else if (bestTarget && bestScore < 13.5) {
+                } else if (bestTarget && bestScore < 20.0) {
                     goalPos = bestTarget.mesh ? bestTarget.mesh.position : bestTarget.pos;
                 }
 
                 const tPos = bestTarget ? (bestTarget.mesh ? bestTarget.mesh.position : bestTarget.pos) : goalPos;
-                const distToTarget = bestTarget ? u.mesh.position.distanceTo(tPos) : Infinity;
+                const distToTarget = (bestTarget && isFiniteVec3(tPos)) ? u.mesh.position.distanceTo(tPos) : Infinity;
 
                 if (bestTarget && distToTarget <= u.range && !isRetreating) {
                     u.aiState = 'ATTACKING';
                     const dx = tPos.x - u.mesh.position.x;
                     const dz = tPos.z - u.mesh.position.z;
-                    u.mesh.rotation.y = Math.atan2(dx, dz);
+                    if (isFiniteCoord(dx) && isFiniteCoord(dz)) {
+                        u.mesh.rotation.y = Math.atan2(dx, dz);
+                    }
 
                     if (u.isTank && u.mesh.userData && u.mesh.userData.turretYawGroup) {
                         u.mesh.userData.turretYawGroup.rotation.y = 0;
@@ -9662,54 +10025,63 @@ window.BATTLE_CINEMATIC = {
                     u.cooldown -= dt;
                     if (u.cooldown <= 0) {
                         u.cooldown = u.fireRate;
-                        const muzzle = (typeof window.getWeaponMuzzleWorldPos === 'function')
+                        const rawMuzzle = (typeof window.getWeaponMuzzleWorldPos === 'function')
                             ? window.getWeaponMuzzleWorldPos(u.mesh, u.role)
+                            : null;
+                        const muzzle = isFiniteVec3(rawMuzzle)
+                            ? rawMuzzle
                             : u.mesh.position.clone().add(new THREE.Vector3(0, u.isAir ? 0.0 : 0.95, 0));
 
                         if (u.isMelee) {
                             bestTarget.hp -= u.damage;
-                            this.focusImpactPos.copy(tPos);
-                            if (typeof triggerSparks === 'function') triggerSparks(tPos);
+                            if (isFiniteVec3(tPos)) this.focusImpactPos.copy(tPos);
+                            if (typeof triggerSparks === 'function' && isFiniteVec3(tPos)) triggerSparks(tPos);
                         } else if (u.role === 'firebat') {
                             bestTarget.hp -= u.damage;
-                            this.focusImpactPos.copy(tPos);
-                            if (typeof spawnFlamethrowerStream === 'function') spawnFlamethrowerStream(muzzle, tPos);
+                            if (isFiniteVec3(tPos)) this.focusImpactPos.copy(tPos);
+                            if (typeof spawnFlamethrowerStream === 'function' && isFiniteVec3(tPos)) spawnFlamethrowerStream(muzzle, tPos);
                         } else {
-                            const wType = u.isTank ? 'tank' : (u.role === 'rocketman' || u.role === 'marauder' || u.role === 'heli' ? 'rocket' : (u.faction === 'zerg' ? 'spit' : 'bullet'));
+                            const wType = u.isTank ? 'tank' : (u.role === 'rocketman' || u.role === 'marauder' || u.role === 'heli' ? 'rocket' : (u.faction === 'zerg' ? 'spit' : (u.faction === 'protoss' ? 'plasma' : 'bullet')));
                             this.spawnSimProjectile(muzzle, bestTarget, wType, u.damage, u.faction);
                         }
                     }
                     if (typeof animateProceduralUnit === 'function') {
                         animateProceduralUnit(u.mesh, u.role, this.time, false, true, 0);
                     }
-                } else if (goalPos) {
+                } else if (isFiniteVec3(goalPos)) {
                     u.aiState = 'MOVING';
                     let stepGoal = goalPos;
                     if (!u.isAir && typeof getGroundNavigationWaypoint === 'function') {
                         u.navTimer -= dt;
-                        if (!u.navWaypoint || u.navTimer <= 0) {
-                            u.navWaypoint = getGroundNavigationWaypoint(u.mesh.position, goalPos, 0.55);
+                        if (!u.navWaypoint || !isFiniteVec3(u.navWaypoint) || u.navTimer <= 0) {
+                            const wp = getGroundNavigationWaypoint(u.mesh.position, goalPos, u);
+                            u.navWaypoint = isFiniteVec3(wp) ? wp.clone() : goalPos.clone();
                             u.navTimer = 0.65;
                         }
-                        if (u.navWaypoint) stepGoal = u.navWaypoint;
+                        if (isFiniteVec3(u.navWaypoint)) stepGoal = u.navWaypoint;
                     }
                     const dx = stepGoal.x - u.mesh.position.x;
                     const dz = stepGoal.z - u.mesh.position.z;
                     const d = Math.hypot(dx, dz);
-                    if (d > 1.1) {
-                        const vx = (dx / d) * u.speed;
-                        const vz = (dz / d) * u.speed;
+                    if (d > 1.1 && isFiniteCoord(d)) {
+                        let nx = u.mesh.position.x + (dx / d) * u.speed * dt;
+                        let nz = u.mesh.position.z + (dz / d) * u.speed * dt;
                         if (!u.isAir && typeof computeSafeGroundStep === 'function') {
-                            const safePt = computeSafeGroundStep(u.mesh.position, vx * dt, vz * dt, 0.52);
-                            u.mesh.position.x = safePt.x;
-                            u.mesh.position.z = safePt.z;
-                        } else {
-                            u.mesh.position.x += vx * dt;
-                            u.mesh.position.z += vz * dt;
+                            const stepDir = computeSafeGroundStep(u.mesh.position, stepGoal, u.speed, dt, u, armyList, this.actors.buildings, null);
+                            if (stepDir && isFiniteCoord(stepDir.x) && isFiniteCoord(stepDir.z) && (Math.abs(stepDir.x) > 0.001 || Math.abs(stepDir.z) > 0.001)) {
+                                nx = u.mesh.position.x + stepDir.x * u.speed * dt;
+                                nz = u.mesh.position.z + stepDir.z * u.speed * dt;
+                            }
                         }
-                        const groundY = surfFn(u.mesh.position.x, u.mesh.position.z);
-                        u.mesh.position.y = groundY + (u.isAir ? 5.2 + Math.sin(this.time * 3.2 + i) * 0.25 : 0);
-                        u.mesh.rotation.y = Math.atan2(dx, dz);
+                        nx = THREE.MathUtils.clamp(nx, -102, 102);
+                        nz = THREE.MathUtils.clamp(nz, -102, 102);
+                        const groundY = surfFn(nx, nz);
+                        if (isFiniteCoord(nx) && isFiniteCoord(nz) && isFiniteCoord(groundY)) {
+                            u.mesh.position.x = nx;
+                            u.mesh.position.z = nz;
+                            u.mesh.position.y = groundY + (u.isAir ? 5.2 + Math.sin(this.time * 3.2 + i) * 0.25 : 0);
+                            u.mesh.rotation.y = Math.atan2(dx, dz);
+                        }
                     }
                     if (typeof animateProceduralUnit === 'function') {
                         animateProceduralUnit(u.mesh, u.role, this.time, true, false, 0);
@@ -9718,8 +10090,8 @@ window.BATTLE_CINEMATIC = {
             }
         };
 
-        stepArmyList(this.actors.infantry, this.actors.enemies, zergStructures, this.teams.team_a);
-        stepArmyList(this.actors.enemies, this.actors.infantry, terranStructures, this.teams.team_b);
+        stepArmyList(this.actors.infantry, this.actors.enemies, teamBStructures, this.teams.team_a);
+        stepArmyList(this.actors.enemies, this.actors.infantry, teamAStructures, this.teams.team_b);
 
         // 5. Update Simulated Projectiles & Apply Real Damage
         for (let i = this.actors.projectiles.length - 1; i >= 0; i--) {
@@ -9727,23 +10099,27 @@ window.BATTLE_CINEMATIC = {
             p.progress += dt * p.speed;
             if (p.target && (p.target.mesh || p.target.pos)) {
                 const tp = p.target.mesh ? p.target.mesh.position : p.target.pos;
-                p.end.set(tp.x, tp.y + (p.target.isAir ? 0 : 0.85), tp.z);
+                if (isFiniteVec3(tp)) {
+                    p.end.set(tp.x, tp.y + (p.target.isAir ? 0 : 0.85), tp.z);
+                }
             }
             const t = Math.min(1, p.progress);
             p.mesh.position.lerpVectors(p.start, p.end, t);
             if (p.wType === 'tank' || p.wType === 'rocket') {
                 p.mesh.position.y += Math.sin(t * Math.PI) * 1.1;
             }
-            if (p.progress >= 1) {
+            if (p.progress >= 1 || !isFiniteVec3(p.mesh.position)) {
                 if (p.target && p.target.hp > 0) {
                     p.target.hp -= p.damage;
-                    this.focusImpactPos.copy(p.end);
+                    if (isFiniteVec3(p.end)) this.focusImpactPos.copy(p.end);
                 }
-                if (p.wType === 'tank') {
-                    if (typeof spawnVolumetricFireball === 'function') spawnVolumetricFireball(p.end, 1.25);
-                    else if (typeof triggerExplosion === 'function') triggerExplosion(p.end, 1.2);
-                } else if (typeof triggerSparks === 'function') {
-                    triggerSparks(p.end);
+                if (isFiniteVec3(p.end)) {
+                    if (p.wType === 'tank') {
+                        if (typeof spawnVolumetricFireball === 'function') spawnVolumetricFireball(p.end, 1.25);
+                        else if (typeof triggerExplosion === 'function') triggerExplosion(p.end, 1.2);
+                    } else if (typeof triggerSparks === 'function') {
+                        triggerSparks(p.end);
+                    }
                 }
                 if (p.mesh.parent) p.mesh.parent.remove(p.mesh);
                 this.disposeCinematicMeshTree(p.mesh);
@@ -9754,18 +10130,18 @@ window.BATTLE_CINEMATIC = {
         // 6. Spectator Camera Director (supports manual override + 5 camera modes)
         if (this.manualCameraOverrideTimer > 0) {
             controls.update();
-            this.camPosSmooth.copy(camera.position);
-            this.camLookSmooth.copy(controls.target);
+            if (isFiniteVec3(camera.position)) this.camPosSmooth.copy(camera.position);
+            if (isFiniteVec3(controls.target)) this.camLookSmooth.copy(controls.target);
             return;
         }
 
-        const ax = this.anchor.x;
-        const ay = this.anchor.y;
-        const az = this.anchor.z;
+        const ax = isFiniteCoord(this.anchor?.x) ? this.anchor.x : 0;
+        const ay = isFiniteCoord(this.anchor?.y) ? this.anchor.y : 0.5;
+        const az = isFiniteCoord(this.anchor?.z) ? this.anchor.z : 0;
 
-        // Compute largest active battle cluster centroid
-        let battleCenter = this.focusImpactPos.clone();
-        const allCombatants = [...this.actors.infantry, ...this.actors.enemies].filter(u => u && u.hp > 0 && u.mesh);
+        // Compute largest active battle cluster centroid with strict finite coordinate guards
+        let battleCenter = isFiniteVec3(this.focusImpactPos) ? this.focusImpactPos.clone() : new THREE.Vector3(ax, ay, az);
+        const allCombatants = [...this.actors.infantry, ...this.actors.enemies].filter(u => u && u.hp > 0 && u.mesh && isFiniteVec3(u.mesh.position));
         if (allCombatants.length > 0) {
             let sx = 0, sy = 0, sz = 0, count = 0;
             for (let i = 0; i < allCombatants.length; i++) {
@@ -9776,7 +10152,9 @@ window.BATTLE_CINEMATIC = {
                 sz += u.mesh.position.z * w;
                 count += w;
             }
-            if (count > 0) battleCenter.set(sx / count, sy / count, sz / count);
+            if (count > 0 && isFiniteCoord(sx) && isFiniteCoord(sy) && isFiniteCoord(sz)) {
+                battleCenter.set(sx / count, sy / count, sz / count);
+            }
         }
 
         const camGoal = new THREE.Vector3();
@@ -9785,48 +10163,52 @@ window.BATTLE_CINEMATIC = {
         const bobZ = Math.cos(this.time * 0.38) * 2.2;
 
         if (this.cameraViewMode === 'birds_eye') {
-            camGoal.set(ax + bobX * 1.4, ay + 40.0, az + 26.0 + bobZ);
+            camGoal.set(ax + bobX * 1.4, ay + 48.0, az + 32.0 + bobZ);
             lookGoal.set(ax, ay + 0.5, az);
         } else if (this.cameraViewMode === 'team_a') {
             const anchorA = this.teams.team_a.baseAnchor;
-            camGoal.set(anchorA.x + 12.0 + bobX, anchorA.y + 16.5, anchorA.z + 14.0);
-            lookGoal.set(anchorA.x, anchorA.y + 1.2, anchorA.z - 3.0);
+            camGoal.set(anchorA.x + 14.0 + bobX, anchorA.y + 18.0, anchorA.z + 16.0);
+            lookGoal.set(anchorA.x, anchorA.y + 1.2, anchorA.z);
         } else if (this.cameraViewMode === 'team_b') {
             const anchorB = this.teams.team_b.baseAnchor;
-            camGoal.set(anchorB.x - 12.0 + bobX, anchorB.y + 16.5, anchorB.z - 14.0);
-            lookGoal.set(anchorB.x, anchorB.y + 1.2, anchorB.z + 3.0);
+            camGoal.set(anchorB.x - 14.0 + bobX, anchorB.y + 18.0, anchorB.z - 16.0);
+            lookGoal.set(anchorB.x, anchorB.y + 1.2, anchorB.z);
         } else if (this.cameraViewMode === 'ground_operator') {
-            camGoal.set(battleCenter.x + 9.5 + bobX, battleCenter.y + 7.5, battleCenter.z + 10.5 + bobZ);
+            camGoal.set(battleCenter.x + 11.0 + bobX, battleCenter.y + 9.0, battleCenter.z + 12.0 + bobZ);
             lookGoal.set(battleCenter.x, battleCenter.y + 1.1, battleCenter.z);
         } else {
-            // 'auto' mode cycles smoothly between base building, resource mining, and the largest active battle
+            // 'auto' mode cycles smoothly between Team A platform, frontline battle, and Team B platform
             const phaseSlice = Math.floor((this.time / 12.0) % 4);
             if (phaseSlice === 0) {
-                camGoal.set(battleCenter.x + 14.0 + bobX, battleCenter.y + 13.5, battleCenter.z + 15.0 + bobZ);
-                lookGoal.set(battleCenter.x, battleCenter.y + 1.0, battleCenter.z);
-            } else if (phaseSlice === 1) {
                 const anchorA = this.teams.team_a.baseAnchor;
-                camGoal.set(anchorA.x + 11.5 + bobX, anchorA.y + 13.0, anchorA.z + 12.0);
-                lookGoal.set(anchorA.x, anchorA.y + 1.2, anchorA.z - 2.0);
+                camGoal.set(anchorA.x + 13.0 + bobX, anchorA.y + 15.0, anchorA.z + 14.0);
+                lookGoal.set(anchorA.x + this.teams.team_a.rampDir.x * 5.0, anchorA.y + 1.2, anchorA.z + this.teams.team_a.rampDir.z * 5.0);
+            } else if (phaseSlice === 1) {
+                camGoal.set(battleCenter.x + 14.0 + bobX, battleCenter.y + 14.5, battleCenter.z + 15.0 + bobZ);
+                lookGoal.set(battleCenter.x, battleCenter.y + 1.0, battleCenter.z);
             } else if (phaseSlice === 2) {
-                camGoal.set(battleCenter.x - 11.0 + bobX, battleCenter.y + 8.5, battleCenter.z + 11.0);
-                lookGoal.set(battleCenter.x, battleCenter.y + 1.2, battleCenter.z);
-            } else {
                 const anchorB = this.teams.team_b.baseAnchor;
-                camGoal.set(anchorB.x - 11.5 + bobX, anchorB.y + 13.0, anchorB.z - 12.0);
-                lookGoal.set(anchorB.x, anchorB.y + 1.2, anchorB.z + 2.0);
+                camGoal.set(anchorB.x - 13.0 + bobX, anchorB.y + 15.0, anchorB.z - 14.0);
+                lookGoal.set(anchorB.x + this.teams.team_b.rampDir.x * 5.0, anchorB.y + 1.2, anchorB.z + this.teams.team_b.rampDir.z * 5.0);
+            } else {
+                camGoal.set(battleCenter.x - 12.0 + bobX, battleCenter.y + 10.5, battleCenter.z + 12.0);
+                lookGoal.set(battleCenter.x, battleCenter.y + 1.2, battleCenter.z);
             }
         }
 
         // Prevent camera clipping through terrain or structures
-        let minClearanceY = (typeof surfFn === 'function' ? surfFn(camGoal.x, camGoal.z) : ay) + 3.0;
+        const rawCamSurfaceY = typeof surfFn === 'function' ? surfFn(camGoal.x, camGoal.z) : ay;
+        let minClearanceY = (isFiniteCoord(rawCamSurfaceY) ? rawCamSurfaceY : ay) + 3.5;
         for (let b = 0; b < this.actors.buildings.length; b++) {
             const bld = this.actors.buildings[b];
-            if (bld && bld.pos && Math.hypot(camGoal.x - bld.pos.x, camGoal.z - bld.pos.z) < 4.8) {
-                minClearanceY = Math.max(minClearanceY, bld.pos.y + 5.2);
+            if (bld && isFiniteVec3(bld.pos) && Math.hypot(camGoal.x - bld.pos.x, camGoal.z - bld.pos.z) < 5.0) {
+                minClearanceY = Math.max(minClearanceY, bld.pos.y + 5.5);
             }
         }
         if (camGoal.y < minClearanceY) camGoal.y = minClearanceY;
+
+        if (!isFiniteVec3(this.camPosSmooth)) this.camPosSmooth.copy(camGoal);
+        if (!isFiniteVec3(this.camLookSmooth)) this.camLookSmooth.copy(lookGoal);
 
         this.camPosSmooth.x = THREE.MathUtils.damp(this.camPosSmooth.x, camGoal.x, 2.8, dt);
         this.camPosSmooth.y = THREE.MathUtils.damp(this.camPosSmooth.y, camGoal.y, 2.8, dt);
@@ -9836,9 +10218,11 @@ window.BATTLE_CINEMATIC = {
         this.camLookSmooth.y = THREE.MathUtils.damp(this.camLookSmooth.y, lookGoal.y, 3.6, dt);
         this.camLookSmooth.z = THREE.MathUtils.damp(this.camLookSmooth.z, lookGoal.z, 3.6, dt);
 
-        camera.position.copy(this.camPosSmooth);
-        controls.target.copy(this.camLookSmooth);
-        controls.update();
+        if (isFiniteVec3(this.camPosSmooth) && isFiniteVec3(this.camLookSmooth)) {
+            camera.position.copy(this.camPosSmooth);
+            controls.target.copy(this.camLookSmooth);
+            controls.update();
+        }
     }
 };
 
@@ -14323,13 +14707,19 @@ function animate(now) {
     try {
         renderer.render(scene, camera);
     } catch (renderErr) {
+        let repairedCount = 0;
         if (window.SCENE_INTEGRITY_VALIDATOR && typeof window.SCENE_INTEGRITY_VALIDATOR.validateSceneGraph === 'function') {
-            window.SCENE_INTEGRITY_VALIDATOR.validateSceneGraph(scene, 'render-exception-recovery');
+            const rep = window.SCENE_INTEGRITY_VALIDATOR.validateSceneGraph(scene, 'render-exception-recovery');
+            repairedCount = (rep && typeof rep.repaired === 'number') ? rep.repaired : 0;
         }
         if (window.APP_ERROR_HANDLER) window.APP_ERROR_HANDLER.record('renderer.render', renderErr, 'graphics');
-        try {
-            renderer.render(scene, camera);
-        } catch (_) {}
+        if (repairedCount > 0) {
+            try {
+                renderer.render(scene, camera);
+            } catch (retryErr) {
+                if (window.APP_ERROR_HANDLER) window.APP_ERROR_HANDLER.record('renderer.render.retry', retryErr, 'graphics');
+            }
+        }
     }
     if (perfProf) {
         perfProf.end('renderScene');
@@ -14382,16 +14772,21 @@ window.validateAndBuildMultiplayerRoster = function(lobbyConfig) {
         return { valid: false, errors: ['Missing lobby configuration object.'], roster: [] };
     }
 
-    const rawSlots = Array.isArray(lobbyConfig.slots)
-        ? lobbyConfig.slots
-        : (Array.isArray(lobbyConfig.lobbyPlayers) ? lobbyConfig.lobbyPlayers : []);
+    const rawSlots = Array.isArray(lobbyConfig.players)
+        ? lobbyConfig.players
+        : (Array.isArray(lobbyConfig.slots)
+            ? lobbyConfig.slots
+            : (Array.isArray(lobbyConfig.lobbyPlayers) ? lobbyConfig.lobbyPlayers : []));
 
     if (rawSlots.length < 2) {
         errors.push(`Invalid participant count (${rawSlots.length}). At least 2 participants are required.`);
     }
 
+    const explicitLocalPlayerId = lobbyConfig.localPlayerId ? String(lobbyConfig.localPlayerId).trim() : '';
     const roster = [];
     const distinctTeams = new Set();
+    const seenPlayerIds = new Set();
+    const seenSlotIds = new Set();
     let humanCount = 0;
 
     for (let i = 0; i < rawSlots.length; i++) {
@@ -14400,19 +14795,43 @@ window.validateAndBuildMultiplayerRoster = function(lobbyConfig) {
             errors.push(`Slot #${i + 1} is null or malformed.`);
             continue;
         }
-        const slotId = String(s.slotId || s.id || `slot_${i + 1}`);
-        const playerId = String(s.playerId || s.id || slotId);
-        const type = (s.type === 'ai' || s.isBot === true) ? 'ai' : ((s.type === 'human' || s.isBot === false) ? 'human' : '');
+        const rawId = s.id !== undefined ? String(s.id).trim() : '';
+        const rawPlayerId = s.playerId !== undefined ? String(s.playerId).trim() : '';
+        const rawSlotId = s.slotId !== undefined ? String(s.slotId).trim() : '';
+
+        const playerId = rawPlayerId || rawId || rawSlotId;
+        const slotId = rawSlotId || rawId || rawPlayerId || `slot_${i + 1}`;
+
+        if (!playerId) {
+            errors.push(`Slot #${i + 1} is missing a valid participant ID.`);
+        } else if (seenPlayerIds.has(playerId)) {
+            errors.push(`Duplicate participant ID "${playerId}" detected at slot #${i + 1}.`);
+        } else {
+            seenPlayerIds.add(playerId);
+        }
+
+        if (seenSlotIds.has(slotId) && slotId !== playerId) {
+            errors.push(`Duplicate slot ID "${slotId}" detected at slot #${i + 1}.`);
+        } else {
+            seenSlotIds.add(slotId);
+        }
+
+        const rawTypeStr = String(s.type || '').trim().toLowerCase();
+        const isAiFlag = s.isAi === true || s.isBot === true || rawTypeStr === 'ai' || rawTypeStr === 'bot';
+        const isHumanFlag = s.isAi === false || s.isBot === false || rawTypeStr === 'human';
+        const type = isAiFlag ? 'ai' : (isHumanFlag ? 'human' : '');
+
         if (type !== 'human' && type !== 'ai') {
-            errors.push(`Slot "${slotId}" has invalid participant type "${s.type}".`);
+            errors.push(`Slot "${slotId}" has invalid participant type (type="${s.type}", isAi=${s.isAi}, isBot=${s.isBot}).`);
         }
         if (type === 'human') humanCount++;
 
-        const teamId = Number(s.teamId !== undefined ? s.teamId : s.team);
-        if (!Number.isInteger(teamId) || teamId < 1 || teamId > 8) {
-            errors.push(`Slot "${slotId}" has invalid team assignment (${s.teamId ?? s.team}).`);
+        const rawTeamVal = s.team !== undefined ? s.team : s.teamId;
+        const teamId = Number(rawTeamVal);
+        if (!Number.isInteger(teamId) || teamId < 0 || teamId > 8) {
+            errors.push(`Slot "${slotId}" has invalid team assignment (${rawTeamVal}).`);
         } else {
-            distinctTeams.add(teamId);
+            distinctTeams.add(teamId === 0 ? `ffa_${playerId || i}` : String(teamId));
         }
 
         const faction = normalizeMultiplayerFaction(s.faction);
@@ -14428,18 +14847,43 @@ window.validateAndBuildMultiplayerRoster = function(lobbyConfig) {
             }
         }
 
+        const ready = type === 'ai' ? true : (s.ready !== false);
+        if (type === 'human' && s.ready === false) {
+            errors.push(`Human participant "${s.name || playerId}" is not ready.`);
+        }
+
+        const isMatchedLocal = explicitLocalPlayerId
+            ? (type === 'human' && (playerId === explicitLocalPlayerId || slotId === explicitLocalPlayerId))
+            : Boolean(s.isLocalHuman);
+
         roster.push({
+            id: playerId,
             slotId,
             playerId,
             name: String(s.name || (type === 'ai' ? `AI Commander ${i + 1}` : `Commander ${i + 1}`)),
             type,
+            isAi: type === 'ai',
+            isBot: type === 'ai',
             teamId,
             team: teamId,
-            isBot: type === 'ai',
             faction,
+            rawFaction: String(s.faction || faction),
             aiDifficulty,
-            isLocalHuman: Boolean(s.isLocalHuman || (type === 'human' && (s.playerId === lobbyConfig.localPlayerId || humanCount === 1)))
+            difficulty: aiDifficulty,
+            ready,
+            isHost: Boolean(s.isHost),
+            isLocalHuman: isMatchedLocal
         });
+    }
+
+    // If no explicit localPlayerId matched or was provided, fall back to explicit isLocalHuman or first human
+    if (!roster.some(r => r.isLocalHuman)) {
+        const fallbackHuman = explicitLocalPlayerId
+            ? roster.find(r => r.type === 'human' && (r.playerId === explicitLocalPlayerId || r.id === explicitLocalPlayerId))
+            : roster.find(r => r.type === 'human');
+        if (fallbackHuman) {
+            fallbackHuman.isLocalHuman = true;
+        }
     }
 
     if (humanCount < 1) {
@@ -14456,6 +14900,7 @@ window.validateAndBuildMultiplayerRoster = function(lobbyConfig) {
         valid: errors.length === 0,
         errors,
         roster,
+        localPlayerId: explicitLocalPlayerId || (roster.find(r => r.isLocalHuman)?.playerId || null),
         teamCount: distinctTeams.size,
         humanCount,
         aiCount: roster.filter(r => r.type === 'ai').length
@@ -14463,21 +14908,39 @@ window.validateAndBuildMultiplayerRoster = function(lobbyConfig) {
 };
 
 // Spawns ONLY the exact participants from the validated roster (no unrequested Solaris allies or default extras)
-function spawnLobbyExpansionBases(lobbyPlayers) {
-    if (!Array.isArray(lobbyPlayers) || lobbyPlayers.length === 0) return;
+function spawnLobbyExpansionBases(lobbyPlayersOrConfig, localPlayerIdOverride) {
+    const configObj = Array.isArray(lobbyPlayersOrConfig)
+        ? { players: lobbyPlayersOrConfig, localPlayerId: localPlayerIdOverride || (state.multiplayerConfig && state.multiplayerConfig.localPlayerId) || null }
+        : (lobbyPlayersOrConfig && typeof lobbyPlayersOrConfig === 'object' ? lobbyPlayersOrConfig : { players: [] });
 
-    const validation = window.validateAndBuildMultiplayerRoster({ slots: lobbyPlayers });
-    const roster = validation.roster.length > 0 ? validation.roster : lobbyPlayers;
-    const localHuman = roster.find(p => p.type === 'human' && p.isLocalHuman) || roster.find(p => p.type === 'human') || roster[0];
-    const localTeamId = localHuman ? (localHuman.teamId || localHuman.team || 1) : 1;
+    const validation = window.validateAndBuildMultiplayerRoster(configObj);
+    if (!validation.valid || validation.roster.length === 0) return validation;
 
-    const alliedParticipants = roster.filter(p => p !== localHuman && (p.teamId || p.team) === localTeamId);
-    const hostileParticipants = roster.filter(p => (p.teamId || p.team) !== localTeamId);
+    const roster = validation.roster;
+    const targetLocalId = localPlayerIdOverride || configObj.localPlayerId || validation.localPlayerId;
+    const localHuman = (targetLocalId && roster.find(p => p.type === 'human' && (p.playerId === targetLocalId || p.id === targetLocalId || p.slotId === targetLocalId)))
+        || roster.find(p => p.type === 'human' && p.isLocalHuman)
+        || roster.find(p => p.type === 'human')
+        || roster[0];
+
+    const localTeamId = localHuman ? (localHuman.teamId !== undefined ? localHuman.teamId : (localHuman.team !== undefined ? localHuman.team : 1)) : 1;
+
+    const isSameTeamAsLocal = (p) => {
+        if (!p || p === localHuman) return false;
+        const pTeam = p.teamId !== undefined ? p.teamId : p.team;
+        if (localTeamId === 0 || pTeam === 0) return false; // Free-For-All: everyone is hostile
+        return pTeam === localTeamId;
+    };
+
+    const alliedParticipants = roster.filter(p => p !== localHuman && isSameTeamAsLocal(p));
+    const hostileParticipants = roster.filter(p => p !== localHuman && !isSameTeamAsLocal(p));
 
     state.isMultiplayerMatch = true;
     state.hasAlliedAiCommander = alliedParticipants.length > 0;
     state.playerTeamId = localTeamId;
+    state.localPlayerId = localHuman ? localHuman.playerId : null;
     state.activeMultiplayerRoster = roster;
+    state.multiplayerParticipants = roster;
 
     // 1. If 0 allied AI/players are on the human player's team, ensure 0 Solaris ally structures/units exist!
     solarisBuildings.forEach(sb => {
@@ -14523,11 +14986,13 @@ function spawnLobbyExpansionBases(lobbyPlayers) {
         .sort((a, b) => Math.hypot(b.x - PLAYER_START_POS.x, b.z - PLAYER_START_POS.z) - Math.hypot(a.x - PLAYER_START_POS.x, a.z - PLAYER_START_POS.z));
     for (let zi = 0; zi < sortedFarZones.length; zi++) {
         const z = sortedFarZones[zi];
-        if (Math.hypot(z.x - ENEMY_BASE_POS.x, z.z - ENEMY_BASE_POS.z) > 18.0 && Math.hypot(z.x - PLAYER_START_POS.x, z.z - PLAYER_START_POS.z) > 45.0) {
+        if (Number.isFinite(z.x) && Number.isFinite(z.z) &&
+            Math.hypot(z.x - ENEMY_BASE_POS.x, z.z - ENEMY_BASE_POS.z) > 18.0 &&
+            Math.hypot(z.x - PLAYER_START_POS.x, z.z - PLAYER_START_POS.z) > 45.0) {
             hostileSpawnCoords.push({ x: z.x, z: z.z, id: z.id });
         }
     }
-    if (typeof SOLARIS_BASE_POS !== 'undefined' && alliedParticipants.length === 0) {
+    if (typeof SOLARIS_BASE_POS !== 'undefined' && alliedParticipants.length === 0 && Number.isFinite(SOLARIS_BASE_POS.x) && Number.isFinite(SOLARIS_BASE_POS.z)) {
         hostileSpawnCoords.push({ x: SOLARIS_BASE_POS.x, z: SOLARIS_BASE_POS.z, id: 'solaris_sector_anchor' });
     }
 
@@ -14542,9 +15007,17 @@ function spawnLobbyExpansionBases(lobbyPlayers) {
         };
         usedZoneIds.add(coord.id);
 
-        const basePos = resolveSafeEnemyBuildingPos(new THREE.Vector3(coord.x, getTerrainHeight(coord.x, coord.z), coord.z), 3.2, true);
+        const rawGroundY = getTerrainHeight(coord.x, coord.z);
+        const safeGroundY = Number.isFinite(rawGroundY) ? rawGroundY : 0;
+        const basePos = resolveSafeEnemyBuildingPos(new THREE.Vector3(coord.x, safeGroundY, coord.z), 3.2, true);
+        if (!Number.isFinite(basePos.x) || !Number.isFinite(basePos.z)) {
+            basePos.set(ENEMY_BASE_POS.x, 0, ENEMY_BASE_POS.z);
+        }
         if (typeof window.flattenTerrainUnderBuilding === 'function') {
-            basePos.y = window.flattenTerrainUnderBuilding(basePos.x, basePos.z, 3.8, 2.2);
+            const flatY = window.flattenTerrainUnderBuilding(basePos.x, basePos.z, 3.8, 2.2);
+            basePos.y = Number.isFinite(flatY) ? flatY : safeGroundY;
+        } else {
+            basePos.y = safeGroundY;
         }
 
         const fac = normalizeMultiplayerFaction(cmdr.faction) || 'zerg';
@@ -14565,6 +15038,9 @@ function spawnLobbyExpansionBases(lobbyPlayers) {
             hqMesh = createEngineeredBuilding('base', false);
         }
         hqMesh.position.copy(basePos);
+        if (typeof window.tagSceneObjectMetadata === 'function') {
+            window.tagSceneObjectMetadata(hqMesh, 'spawnLobbyExpansionBases.hostileHQ', 'multiplayer-spawner', { participantId: cmdr.playerId });
+        }
         scene.add(hqMesh);
 
         const cBadge = document.createElement('div');
@@ -14575,9 +15051,11 @@ function spawnLobbyExpansionBases(lobbyPlayers) {
             role: 'citadel',
             slotId: cmdr.slotId,
             playerId: cmdr.playerId,
+            participantType: cmdr.type,
+            isAi: cmdr.type === 'ai',
             commanderName: cmdr.name,
             faction: fac,
-            teamId: cmdr.teamId || cmdr.team || 2,
+            teamId: cmdr.teamId !== undefined ? cmdr.teamId : (cmdr.team || 2),
             aiDifficulty: diffKey,
             isExpansionCitadel: hi > 0,
             expCreepMesh,
@@ -14599,14 +15077,24 @@ function spawnLobbyExpansionBases(lobbyPlayers) {
         // Spawn 1 faction production building per hostile commander so each configured AI actively produces units
         const prodOffset = new THREE.Vector3(basePos.x + (hi % 2 === 0 ? 5.2 : -5.2), 0, basePos.z + 6.5);
         const prodPos = resolveSafeEnemyBuildingPos(prodOffset, 2.8, true, basePos, 20.0);
+        if (!Number.isFinite(prodPos.x) || !Number.isFinite(prodPos.z)) {
+            prodPos.set(basePos.x + 5.2, basePos.y, basePos.z + 6.5);
+        }
         if (typeof window.flattenTerrainUnderBuilding === 'function') {
-            prodPos.y = window.flattenTerrainUnderBuilding(prodPos.x, prodPos.z, 3.2, 1.8);
+            const flatProdY = window.flattenTerrainUnderBuilding(prodPos.x, prodPos.z, 3.2, 1.8);
+            prodPos.y = Number.isFinite(flatProdY) ? flatProdY : basePos.y;
+        } else {
+            const gProdY = getTerrainHeight(prodPos.x, prodPos.z);
+            prodPos.y = Number.isFinite(gProdY) ? gProdY : basePos.y;
         }
         let prodMesh;
         if (fac === 'zerg') prodMesh = createEnemySpawningPool();
         else if (fac === 'protoss') prodMesh = createEngineeredBuilding('solaris_gate', false);
         else prodMesh = createEngineeredBuilding('barracks', false);
         prodMesh.position.copy(prodPos);
+        if (typeof window.tagSceneObjectMetadata === 'function') {
+            window.tagSceneObjectMetadata(prodMesh, 'spawnLobbyExpansionBases.hostileProd', 'multiplayer-spawner', { participantId: cmdr.playerId });
+        }
         scene.add(prodMesh);
         const pBadge = document.createElement('div');
         pBadge.style.display = 'none';
@@ -14615,9 +15103,11 @@ function spawnLobbyExpansionBases(lobbyPlayers) {
             role: 'barracks',
             slotId: cmdr.slotId,
             playerId: cmdr.playerId,
+            participantType: cmdr.type,
+            isAi: cmdr.type === 'ai',
             commanderName: cmdr.name,
             faction: fac,
-            teamId: cmdr.teamId || cmdr.team || 2,
+            teamId: cmdr.teamId !== undefined ? cmdr.teamId : (cmdr.team || 2),
             aiDifficulty: diffKey,
             bpIdx: hi,
             mesh: prodMesh,
@@ -14634,14 +15124,14 @@ function spawnLobbyExpansionBases(lobbyPlayers) {
         });
     }
 
-    // 3. Spawn Allied AI bases ONLY if allied AI slots were explicitly configured on the human player's team
+    // 3. Spawn Allied bases ONLY if allied slots were explicitly configured on the local human player's team
     if (alliedParticipants.length > 0) {
         const alliedCoords = [];
-        if (typeof SOLARIS_BASE_POS !== 'undefined') {
+        if (typeof SOLARIS_BASE_POS !== 'undefined' && Number.isFinite(SOLARIS_BASE_POS.x) && Number.isFinite(SOLARIS_BASE_POS.z)) {
             alliedCoords.push({ x: SOLARIS_BASE_POS.x, z: SOLARIS_BASE_POS.z });
         }
         const sortedNearZones = expansionZones
-            .filter(z => !usedZoneIds.has(z.id))
+            .filter(z => !usedZoneIds.has(z.id) && Number.isFinite(z.x) && Number.isFinite(z.z))
             .sort((a, b) => Math.hypot(a.x - PLAYER_START_POS.x, a.z - PLAYER_START_POS.z) - Math.hypot(b.x - PLAYER_START_POS.x, b.z - PLAYER_START_POS.z));
         for (let zi = 0; zi < sortedNearZones.length; zi++) {
             alliedCoords.push({ x: sortedNearZones[zi].x, z: sortedNearZones[zi].z });
@@ -14650,23 +15140,36 @@ function spawnLobbyExpansionBases(lobbyPlayers) {
         for (let ai = 0; ai < alliedParticipants.length; ai++) {
             const allyCmdr = alliedParticipants[ai];
             const ac = alliedCoords[ai % alliedCoords.length] || { x: PLAYER_START_POS.x - 18.0, z: PLAYER_START_POS.z - 12.0 };
-            const allyPos = resolveSafeEnemyBuildingPos(new THREE.Vector3(ac.x, getTerrainHeight(ac.x, ac.z), ac.z), 3.0, true);
+            const rawAllyY = getTerrainHeight(ac.x, ac.z);
+            const safeAllyY = Number.isFinite(rawAllyY) ? rawAllyY : 0;
+            const allyPos = resolveSafeEnemyBuildingPos(new THREE.Vector3(ac.x, safeAllyY, ac.z), 3.0, true);
+            if (!Number.isFinite(allyPos.x) || !Number.isFinite(allyPos.z)) {
+                allyPos.set(PLAYER_START_POS.x - 18.0, safeAllyY, PLAYER_START_POS.z - 12.0);
+            }
             if (typeof window.flattenTerrainUnderBuilding === 'function') {
-                allyPos.y = window.flattenTerrainUnderBuilding(allyPos.x, allyPos.z, 3.6, 2.0);
+                const flatAllyY = window.flattenTerrainUnderBuilding(allyPos.x, allyPos.z, 3.6, 2.0);
+                allyPos.y = Number.isFinite(flatAllyY) ? flatAllyY : safeAllyY;
+            } else {
+                allyPos.y = safeAllyY;
             }
             const allyFac = normalizeMultiplayerFaction(allyCmdr.faction) || 'protoss';
             const allyHqType = allyFac === 'terran' ? 'base' : 'solaris_nexus';
             const hqMesh = createEngineeredBuilding(allyHqType, false);
             hqMesh.position.copy(allyPos);
+            if (typeof window.tagSceneObjectMetadata === 'function') {
+                window.tagSceneObjectMetadata(hqMesh, 'spawnLobbyExpansionBases.allyHQ', 'multiplayer-spawner', { participantId: allyCmdr.playerId });
+            }
             scene.add(hqMesh);
             solarisBuildings.push({
                 type: allyHqType,
                 role: 'nexus',
                 slotId: allyCmdr.slotId,
                 playerId: allyCmdr.playerId,
+                participantType: allyCmdr.type,
+                isAi: allyCmdr.type === 'ai',
                 commanderName: allyCmdr.name,
                 faction: allyFac,
-                teamId: allyCmdr.teamId || allyCmdr.team || localTeamId,
+                teamId: allyCmdr.teamId !== undefined ? allyCmdr.teamId : (allyCmdr.team || localTeamId),
                 aiDifficulty: normalizeAiDifficulty(allyCmdr.aiDifficulty || allyCmdr.difficulty || 'Medium') || 'Medium',
                 bpIdx: ai,
                 mesh: hqMesh,
@@ -14684,6 +15187,18 @@ function spawnLobbyExpansionBases(lobbyPlayers) {
             });
         }
     }
+
+    state.spawnedMultiplayerParticipants = {
+        totalCount: roster.length,
+        distinctTeams: validation.teamCount,
+        localPlayer: localHuman,
+        alliedCount: alliedParticipants.length,
+        hostileCount: hostileParticipants.length,
+        solarisBuildingsCount: solarisBuildings.length,
+        enemyCitadelsCount: enemyBuildings.filter(eb => eb.role === 'citadel').length,
+        enemyBuildingsCount: enemyBuildings.length
+    };
+    return validation;
 }
 
 window.initializeMultiplayerMatchFromRoster = function(lobbyConfig) {
@@ -14694,29 +15209,48 @@ window.initializeMultiplayerMatchFromRoster = function(lobbyConfig) {
     const roster = validation.roster;
     window.CUSTOM_LOBBY_PLAYERS = roster;
 
-    const localHuman = roster.find(p => p.type === 'human' && p.isLocalHuman) || roster.find(p => p.type === 'human') || roster[0];
-    const alliedAi = roster.filter(p => p !== localHuman && p.teamId === localHuman.teamId);
-    const hostileCmdrs = roster.filter(p => p.teamId !== localHuman.teamId);
+    const targetLocalId = (lobbyConfig && lobbyConfig.localPlayerId) || validation.localPlayerId;
+    const localHuman = (targetLocalId && roster.find(p => p.type === 'human' && (p.playerId === targetLocalId || p.id === targetLocalId || p.slotId === targetLocalId)))
+        || roster.find(p => p.type === 'human' && p.isLocalHuman)
+        || roster.find(p => p.type === 'human')
+        || roster[0];
+
+    const localTeamId = localHuman ? (localHuman.teamId !== undefined ? localHuman.teamId : localHuman.team) : 1;
+    const isSameTeam = (p) => {
+        if (!p || p === localHuman) return false;
+        const pTeam = p.teamId !== undefined ? p.teamId : p.team;
+        if (localTeamId === 0 || pTeam === 0) return false;
+        return pTeam === localTeamId;
+    };
+
+    const alliedParticipants = roster.filter(p => p !== localHuman && isSameTeam(p));
+    const hostileCmdrs = roster.filter(p => p !== localHuman && !isSameTeam(p));
 
     state.isMultiplayerMatch = true;
-    state.hasAlliedAiCommander = alliedAi.length > 0;
-    state.playerTeamId = localHuman.teamId;
-    state.playerFaction = localHuman.faction === 'protoss' ? 'solaris' : 'terran';
-    state.aiAllyMode = alliedAi.length > 0 ? 'defensive' : 'off';
+    state.hasAlliedAiCommander = alliedParticipants.length > 0;
+    state.playerTeamId = localTeamId;
+    state.localPlayerId = localHuman ? localHuman.playerId : null;
+    state.playerFaction = localHuman.faction === 'protoss' ? 'solaris' : (localHuman.faction === 'zerg' ? 'zerg' : 'terran');
+    state.aiAllyMode = alliedParticipants.length > 0 ? 'defensive' : 'off';
 
     const badge = document.getElementById('mode-badge');
     if (badge) {
-        badge.innerText = state.playerFaction === 'solaris' ? 'SOLARIS PROTOSS' : 'TERRAN DOMINION';
+        badge.innerText = state.playerFaction === 'solaris'
+            ? 'SOLARIS PROTOSS'
+            : (state.playerFaction === 'zerg' ? 'ZERG SWARM' : 'TERRAN DOMINION');
     }
 
-    spawnLobbyExpansionBases(roster);
+    spawnLobbyExpansionBases({ players: roster, localPlayerId: localHuman ? localHuman.playerId : null });
 
     return {
         valid: true,
         errors: [],
         roster,
+        teamCount: validation.teamCount,
+        humanCount: validation.humanCount,
+        aiCount: validation.aiCount,
         localPlayer: localHuman,
-        alliedCount: alliedAi.length,
+        alliedCount: alliedParticipants.length,
         hostileCount: hostileCmdrs.length,
         solarisBuildingsCount: solarisBuildings.length,
         enemyCitadelsCount: enemyBuildings.filter(eb => eb.role === 'citadel').length,
@@ -14767,7 +15301,8 @@ window.GAME_API = {
         if (window.BATTLE_CINEMATIC && typeof window.BATTLE_CINEMATIC.cleanup === 'function') {
             window.BATTLE_CINEMATIC.cleanup();
         }
-        const hasMpRoster = Boolean(config && (Array.isArray(config.slots) || Array.isArray(config.lobbyPlayers)) && (config.slots || config.lobbyPlayers).length >= 2);
+        const rawMpList = config && (config.players || config.slots || config.lobbyPlayers);
+        const hasMpRoster = Boolean(config && (config.isMultiplayer || (Array.isArray(rawMpList) && rawMpList.length >= 2)));
         if (config && typeof config === 'object') {
             state.multiplayerConfig = config;
             if (config.startingMinerals && typeof config.startingMinerals === 'number') {
@@ -14780,6 +15315,7 @@ window.GAME_API = {
                     return mpInit;
                 }
             } else {
+                window.CUSTOM_LOBBY_PLAYERS = null;
                 state.isMultiplayerMatch = false;
                 state.hasAlliedAiCommander = true;
                 if (config.aiAllyMode) {
@@ -14788,6 +15324,7 @@ window.GAME_API = {
                 }
             }
         } else {
+            window.CUSTOM_LOBBY_PLAYERS = null;
             state.isMultiplayerMatch = false;
             state.hasAlliedAiCommander = true;
         }
@@ -14956,6 +15493,8 @@ window.GAME_API = {
         // Real 10-stage world initialization pipeline driven by actual engine verification
         const idx = Number(stepIndex) || 0;
         const tStepStart = performance.now();
+        const rawMpList = config && (config.players || config.slots || config.lobbyPlayers);
+        const hasMpRoster = Boolean(config && (config.isMultiplayer || (Array.isArray(rawMpList) && rawMpList.length >= 2)));
         const recordVal = (name, cat, ok, details) => {
             if (window.SYSTEM_INIT_VALIDATOR) {
                 window.SYSTEM_INIT_VALIDATOR.recordStage(name, cat, ok ? 'PASS' : 'FAIL', performance.now() - tStepStart, details);
@@ -14975,7 +15514,7 @@ window.GAME_API = {
             case 1: {
                 // Step 2: Generate / Verify Procedural Canyon Terrain, River & Bridges
                 if (config && config.forceRegen && typeof window.regenerateDynamicSectorMap === 'function') {
-                    window.regenerateDynamicSectorMap(config.seed, config.lobbyPlayers || []);
+                    window.regenerateDynamicSectorMap(config.seed, rawMpList || []);
                 }
                 const tPipe = typeof window.validateAndRepairTerrainPipeline === 'function'
                     ? window.validateAndRepairTerrainPipeline()
@@ -15014,7 +15553,12 @@ window.GAME_API = {
                 return { ok: hasModels, stage: '3-Faction Procedural 3D Meshes & Shaders Compiled' };
             }
             case 5: {
-                // Step 6: Spawn Enemy Zerg Hive Cluster & Creep Network
+                // Step 6: Spawn Hostile Commanders or Single-Player Zerg Hive Cluster
+                if (hasMpRoster) {
+                    const mpInit = window.initializeMultiplayerMatchFromRoster(config);
+                    recordVal('Stage 6: Multiplayer Opponents', 'Buildings', Boolean(mpInit && mpInit.valid), `HostileStructures=${enemyBuildings.length}`);
+                    return { ok: Boolean(mpInit && mpInit.valid), stage: `Multiplayer Opposing Forces (${enemyBuildings.length} Structures) Online` };
+                }
                 if (!state.enemyBase || enemyBuildings.length === 0) {
                     initEnemyHiveCluster();
                 }
@@ -15022,9 +15566,10 @@ window.GAME_API = {
                 return { ok: enemyBuildings.length > 0, stage: `Zerg Overmind Hive Cluster (${enemyBuildings.length} Bio-Structures) Online` };
             }
             case 6: {
-                // Step 7: Spawn Solaris Protoss Enclave & Expansion Bases
-                if (config && Array.isArray(config.lobbyPlayers) && config.lobbyPlayers.length > 2) {
-                    spawnLobbyExpansionBases(config.lobbyPlayers);
+                // Step 7: Verify Allied Factions & Multiplayer Expansion Roster
+                if (hasMpRoster) {
+                    recordVal('Stage 7: Multiplayer Roster Sync', 'Units & Factions', true, `AlliedStructures=${solarisBuildings.length}, HostileStructures=${enemyBuildings.length}`);
+                    return { ok: true, stage: `Multiplayer Roster & Faction Bases Synchronized` };
                 }
                 recordVal('Stage 7: Solaris Protoss Enclave', 'Units & Factions', true, `SolarisStructures=${solarisBuildings.length}`);
                 return { ok: true, stage: `Solaris Protoss Enclave & Warp Matrix Synchronized` };

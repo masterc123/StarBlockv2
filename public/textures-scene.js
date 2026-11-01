@@ -133,6 +133,10 @@
                 const nowTime = nowIso.slice(11, 23);
                 const msg = err && err.message ? String(err.message) : String(err ?? 'Unknown error');
                 const rawStack = err && err.stack ? String(err.stack) : (extraMeta && extraMeta.stack ? String(extraMeta.stack) : `${context}: ${msg}`);
+                // Distinguish Vite development HMR WebSocket (/@vite/client) from application multiplayer WebSocket (/ws)
+                if (msg.includes('/@vite/client') || rawStack.includes('/@vite/client') || (msg.includes('[vite]') && msg.toLowerCase().includes('websocket'))) {
+                    return;
+                }
                 const parsedLoc = parseStackLocation(
                     rawStack,
                     extraMeta && extraMeta.file,
@@ -1559,6 +1563,10 @@ if (IS_MOBILE) {
     camera.position.set(30, 52, 74);
     controls.maxDistance = 165;
 }
+window.scene = scene;
+window.camera = camera;
+window.renderer = renderer;
+window.controls = controls;
 
 const keysPressed = {};
 window.addEventListener('keydown', e => { keysPressed[e.key.toLowerCase()] = true; });
@@ -1809,16 +1817,26 @@ const SCENE_INTEGRITY_VALIDATOR = {
         if (stackStr.includes('game.js')) return 'game-loop';
         return 'scene-graph';
     },
+    _hasInvalidMatrix(mat) {
+        if (!mat || !mat.elements || mat.elements.length !== 16) return true;
+        for (let i = 0; i < 16; i++) {
+            if (!Number.isFinite(mat.elements[i])) return true;
+        }
+        return false;
+    },
     recordInvalidObject(info) {
         const entry = {
             timestamp: new Date().toISOString(),
             name: info.name || '<unnamed>',
+            uuid: info.uuid || '<no-uuid>',
             type: info.type || typeof info.rawObject,
             parent: info.parentName || (info.parent ? (info.parent.name || info.parent.type || info.parent.uuid) : '<root>'),
             parentUuid: info.parent ? info.parent.uuid : null,
-            uuid: info.uuid || '<no-uuid>',
             creationSource: info.creationSource || 'unknown',
             subsystem: info.subsystem || 'scene-graph',
+            invalidPositionOrMatrix: info.invalidPositionOrMatrix || info.reason || 'Invalid Object3D in scene hierarchy',
+            participantId: info.participantId || null,
+            bridgeId: info.bridgeId !== undefined ? info.bridgeId : null,
             reason: info.reason || 'Invalid Object3D in scene hierarchy'
         };
         this.reports.push(entry);
@@ -1827,17 +1845,18 @@ const SCENE_INTEGRITY_VALIDATOR = {
         if (window.APP_ERROR_HANDLER && typeof window.APP_ERROR_HANDLER.record === 'function') {
             window.APP_ERROR_HANDLER.record(
                 'scene-integrity',
-                `Invalid scene object (${entry.reason}): name=${entry.name}, type=${entry.type}, parent=${entry.parent}, uuid=${entry.uuid}, source=${entry.creationSource}`,
+                `Invalid scene object (${entry.reason}): name=${entry.name}, uuid=${entry.uuid}, type=${entry.type}, parent=${entry.parent}, source=${entry.creationSource}, subsystem=${entry.subsystem}, posOrMat=${entry.invalidPositionOrMatrix}, participant=${entry.participantId || 'none'}, bridge=${entry.bridgeId ?? 'none'}`,
                 entry.subsystem
             );
         }
         return entry;
     },
     validateSceneGraph(rootObj, subsystemContext = 'render-loop') {
-        if (!rootObj) return { valid: false, repairedCount: 0, reports: this.reports };
+        const targetRoot = rootObj || (typeof scene !== 'undefined' ? scene : window.scene);
+        if (!targetRoot) return { valid: false, repaired: 0, repairedCount: 0, invalidCount: 0, reports: this.reports };
         this.totalChecks++;
         let repairedCount = 0;
-        const stack = [rootObj];
+        const stack = [targetRoot];
         const visited = new Set();
 
         while (stack.length > 0) {
@@ -1853,6 +1872,16 @@ const SCENE_INTEGRITY_VALIDATOR = {
             if (Array.isArray(node.children)) {
                 for (let i = node.children.length - 1; i >= 0; i--) {
                     const child = node.children[i];
+                    const hasBadPos = !child || !child.position ||
+                        !Number.isFinite(child.position.x) ||
+                        !Number.isFinite(child.position.y) ||
+                        !Number.isFinite(child.position.z);
+                    const hasBadScale = child && child.scale && (
+                        !Number.isFinite(child.scale.x) ||
+                        !Number.isFinite(child.scale.y) ||
+                        !Number.isFinite(child.scale.z)
+                    );
+                    const hasBadMatrix = !child || !child.matrixWorld || this._hasInvalidMatrix(child.matrixWorld);
                     const isInvalid =
                         child === undefined ||
                         child === null ||
@@ -1860,13 +1889,16 @@ const SCENE_INTEGRITY_VALIDATOR = {
                         !child.isObject3D ||
                         typeof child.visible === 'undefined' ||
                         !Array.isArray(child.children) ||
-                        !child.matrixWorld ||
-                        !child.position ||
-                        Number.isNaN(child.position.x) ||
-                        Number.isNaN(child.position.y) ||
-                        Number.isNaN(child.position.z);
+                        hasBadPos ||
+                        hasBadScale ||
+                        hasBadMatrix;
 
                     if (isInvalid) {
+                        const ud = (child && child.userData) || (node && node.userData) || {};
+                        const posDesc = child && child.position
+                            ? `pos=(${child.position.x}, ${child.position.y}, ${child.position.z})`
+                            : 'pos=missing';
+                        const matDesc = hasBadMatrix ? 'matrixWorld=NaN/corrupted' : 'matrixWorld=ok';
                         this.recordInvalidObject({
                             rawObject: child,
                             name: child && child.name ? child.name : `children[${i}]`,
@@ -1874,20 +1906,21 @@ const SCENE_INTEGRITY_VALIDATOR = {
                             parent: node,
                             parentName: node.name || node.type || node.uuid,
                             uuid: child && child.uuid ? child.uuid : null,
-                            creationSource: (child && child.userData && child.userData._creationSource) || (node.userData && node.userData._creationSource) || subsystemContext,
-                            subsystem: (child && child.userData && child.userData._subsystem) || (node.userData && node.userData._subsystem) || subsystemContext,
+                            creationSource: ud._creationSource || subsystemContext,
+                            subsystem: ud._subsystem || subsystemContext,
+                            participantId: ud._participantId || ud.participantId || null,
+                            bridgeId: ud._bridgeId !== undefined ? ud._bridgeId : (ud.bridgeId !== undefined ? ud.bridgeId : null),
+                            invalidPositionOrMatrix: `${posDesc}, ${matDesc}`,
                             reason: child === undefined || child === null
                                 ? 'Null or undefined child in Object3D.children'
                                 : (!child.isObject3D || typeof child.visible === 'undefined'
                                     ? 'Non-Object3D or missing .visible property'
                                     : 'NaN position or corrupted matrixWorld')
                         });
-                        if (child && child.isObject3D && Number.isNaN(child.position.x)) {
-                            child.position.set(0, 0, 0);
-                            child.updateMatrix();
-                            child.updateMatrixWorld(true);
-                        } else {
-                            node.children.splice(i, 1);
+                        // Remove corrupted or non-finite objects from the scene so we never leave dummy (0,0,0) artifacts
+                        node.children.splice(i, 1);
+                        if (child && child.parent === node) {
+                            child.parent = null;
                         }
                         repairedCount++;
                         this.totalRepairs++;
@@ -1899,7 +1932,9 @@ const SCENE_INTEGRITY_VALIDATOR = {
         }
         return {
             valid: repairedCount === 0,
+            repaired: repairedCount,
             repairedCount,
+            invalidCount: repairedCount,
             totalChecks: this.totalChecks,
             totalRepairs: this.totalRepairs,
             reports: this.reports
@@ -1907,7 +1942,7 @@ const SCENE_INTEGRITY_VALIDATOR = {
     }
 };
 
-// Guard THREE.Object3D.prototype.add against undefined/invalid objects entering .children
+// Guard THREE.Object3D.prototype.add against undefined/invalid objects or NaN coordinates entering .children
 if (typeof THREE !== 'undefined' && THREE.Object3D && !THREE.Object3D.prototype._starblockGuardedAdd) {
     const _origObject3DAdd = THREE.Object3D.prototype.add;
     THREE.Object3D.prototype.add = function (...objects) {
@@ -1915,8 +1950,14 @@ if (typeof THREE !== 'undefined' && THREE.Object3D && !THREE.Object3D.prototype.
         const validObjects = [];
         for (let i = 0; i < objects.length; i++) {
             const obj = objects[i];
-            if (!obj || typeof obj !== 'object' || !obj.isObject3D || typeof obj.visible === 'undefined') {
+            const hasBadPos = obj && obj.position && (
+                !Number.isFinite(obj.position.x) ||
+                !Number.isFinite(obj.position.y) ||
+                !Number.isFinite(obj.position.z)
+            );
+            if (!obj || typeof obj !== 'object' || !obj.isObject3D || typeof obj.visible === 'undefined' || hasBadPos) {
                 const errStack = new Error().stack || '';
+                const ud = (obj && obj.userData) || (this && this.userData) || {};
                 SCENE_INTEGRITY_VALIDATOR.recordInvalidObject({
                     rawObject: obj,
                     name: obj && obj.name ? obj.name : `add_arg[${i}]`,
@@ -1924,9 +1965,16 @@ if (typeof THREE !== 'undefined' && THREE.Object3D && !THREE.Object3D.prototype.
                     parent: this,
                     parentName: this.name || this.type || this.uuid,
                     uuid: obj && obj.uuid ? obj.uuid : null,
-                    creationSource: errStack.split('\n').slice(1, 4).map(s => s.trim()).join(' <- '),
-                    subsystem: SCENE_INTEGRITY_VALIDATOR._inferSubsystemFromStack(errStack),
-                    reason: 'Attempted to call Object3D.add() with undefined or non-Object3D value'
+                    creationSource: ud._creationSource || errStack.split('\n').slice(1, 4).map(s => s.trim()).join(' <- '),
+                    subsystem: ud._subsystem || SCENE_INTEGRITY_VALIDATOR._inferSubsystemFromStack(errStack),
+                    participantId: ud._participantId || null,
+                    bridgeId: ud._bridgeId !== undefined ? ud._bridgeId : null,
+                    invalidPositionOrMatrix: hasBadPos && obj.position
+                        ? `pos=(${obj.position.x}, ${obj.position.y}, ${obj.position.z})`
+                        : 'Non-Object3D or missing .visible',
+                    reason: hasBadPos
+                        ? 'Attempted to call Object3D.add() with non-finite (NaN/Infinity) position'
+                        : 'Attempted to call Object3D.add() with undefined or non-Object3D value'
                 });
                 continue;
             }

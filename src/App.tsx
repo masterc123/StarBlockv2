@@ -153,97 +153,10 @@ declare global {
   }
 }
 
-function buildPresetPlayersForMode(
-  mode: LobbyGameMode,
-  humanId: string,
-  humanName: string,
-  humanFaction: LobbyPlayer['faction'],
-  humanPing = 15,
-  defaultBotDiff: 'Easy' | 'Medium' | 'Hard' | 'Brutal' = 'Hard'
-): LobbyPlayer[] {
-  const isFfa = mode === 'ffa' || mode === 'deathmatch';
-  const hostSlot: LobbyPlayer = {
-    id: humanId,
-    name: humanName,
-    isHost: true,
-    isAi: false,
-    team: isFfa ? 0 : 1,
-    faction: humanFaction,
-    ping: humanPing,
-    ready: true,
-    antiCheatVerified: true,
-    antiCheatFlags: 0
-  };
-
-  const makeAi = (
-    idx: number,
-    name: string,
-    team: 1 | 2 | 3 | 4 | 0,
-    faction: LobbyPlayer['faction'],
-    diff: 'Easy' | 'Medium' | 'Hard' | 'Brutal' = defaultBotDiff
-  ): LobbyPlayer => ({
-    id: `bot_preset_${idx}_${Date.now()}`,
-    name: `[AI] ${name}`,
-    isHost: false,
-    isAi: true,
-    aiDifficulty: diff,
-    team,
-    faction,
-    ping: 0,
-    ready: true,
-    antiCheatVerified: true,
-    antiCheatFlags: 0
-  });
-
-  switch (mode) {
-    case '1v1':
-      return [
-        hostSlot,
-        makeAi(1, 'Kerrigan_Brood', 2, 'Zerg Swarm', defaultBotDiff)
-      ];
-    case '1v2':
-      return [
-        hostSlot,
-        makeAi(1, 'Kerrigan_Brood', 2, 'Zerg Swarm', defaultBotDiff),
-        makeAi(2, 'Artanis_Fleet', 2, 'Protoss Fleet', defaultBotDiff)
-      ];
-    case '1v3':
-      return [
-        hostSlot,
-        makeAi(1, 'Kerrigan_Brood', 2, 'Zerg Swarm', defaultBotDiff),
-        makeAi(2, 'Artanis_Fleet', 2, 'Protoss Fleet', defaultBotDiff),
-        makeAi(3, 'Mengsk_Guard', 2, 'Terran Dominion', defaultBotDiff)
-      ];
-    case '2v2':
-    case 'team_ai':
-      return [
-        hostSlot,
-        makeAi(1, 'Tassadar_Solaris', 1, 'Protoss Fleet', defaultBotDiff),
-        makeAi(2, 'Kerrigan_Brood', 2, 'Zerg Swarm', defaultBotDiff),
-        makeAi(3, 'Zagara_Swarm', 2, 'Zerg Swarm', defaultBotDiff)
-      ];
-    case 'ffa':
-    case 'deathmatch':
-      return [
-        hostSlot,
-        makeAi(1, 'Kerrigan_Brood', 0, 'Zerg Swarm', defaultBotDiff),
-        makeAi(2, 'Artanis_Fleet', 0, 'Protoss Fleet', defaultBotDiff),
-        makeAi(3, 'Mengsk_Guard', 0, 'Terran Dominion', defaultBotDiff)
-      ];
-    case 'custom':
-    default:
-      return [
-        hostSlot,
-        makeAi(1, 'Kerrigan_Brood', 2, 'Zerg Swarm', defaultBotDiff)
-      ];
-  }
-}
-
 export default function App() {
   const [phase, setPhase] = useState<'menu' | 'multiplayer_browser' | 'inside_lobby' | 'loading_match' | 'playing' | 'defeat'>('menu');
   const [lobbies, setLobbies] = useState<MultiplayerLobby[]>([]);
   const [selectedLobby, setSelectedLobby] = useState<MultiplayerLobby | null>(null);
-  const [lobbyFilter, setLobbyFilter] = useState<'all' | LobbyGameMode>('all');
   const [lobbyValidationError, setLobbyValidationError] = useState<string | null>(null);
   const [activeBarrierId, setActiveBarrierId] = useState<string>('alpha');
   const [chatMessages, setChatMessages] = useState<ChatMessageEntry[]>([]);
@@ -252,13 +165,16 @@ export default function App() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [newRoomName, setNewRoomName] = useState('Sector-09 Skirmish');
-  const [newRoomMode, setNewRoomMode] = useState<LobbyGameMode>('1v1');
   const [mapSeedDisplay, setMapSeedDisplay] = useState<number>(() => window.MAP_SEED || 100);
   const [mapArchetypeDisplay, setMapArchetypeDisplay] = useState<string>(() => window.MAP_ARCHETYPE || 'open_badlands');
   const [bridgeCountDisplay, setBridgeCountDisplay] = useState<number>(() => (window.BRIDGES ? window.BRIDGES.length : 0));
   const [planetBiome, setPlanetBiome] = useState<'highland' | 'desert' | 'ocean' | 'lava' | 'jungle' | 'random'>('highland');
 
   const handleSelectPlanetBiome = (biome: 'highland' | 'desert' | 'ocean' | 'lava' | 'jungle' | 'random') => {
+    if (selectedLobby && selectedLobby.hostId !== myPlayerId) {
+      setLobbyValidationError('Host permission required: Only the lobby host can change the map biome.');
+      return;
+    }
     setPlanetBiome(biome);
     if (typeof window.setPlanetBiome === 'function') {
       window.setPlanetBiome(biome, true);
@@ -373,16 +289,20 @@ export default function App() {
     specialty: 'Combined Arms Siege & Deep Gem Auger Ops'
   });
 
-  // Real WebSocket state
+  // Real Application Multiplayer WebSocket state (/ws only — never conflated with Vite HMR)
   const [myPlayerId, setMyPlayerId] = useState<string>(() => `usr_${Date.now()}`);
+  const myPlayerIdRef = useRef<string>(myPlayerId);
+  myPlayerIdRef.current = myPlayerId;
   const [myPlayerName, setMyPlayerName] = useState<string>('Marshal_Vance');
   const [wsConnected, setWsConnected] = useState<boolean>(false);
+  const [wsConnectionState, setWsConnectionState] = useState<'offline' | 'connecting' | 'connected'>('connecting');
   const [internetOnline, setInternetOnline] = useState<boolean>(() => typeof navigator !== 'undefined' ? navigator.onLine : true);
   const socketRef = useRef<WebSocket | null>(null);
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
   if (typeof window !== 'undefined') {
     (window as any).__STARBLOCK_PHASE__ = phase;
+    (window as any).__MP_WS_STATE__ = wsConnectionState;
   }
   const inGameChatOpenRef = useRef(inGameChatOpen);
   inGameChatOpenRef.current = inGameChatOpen;
@@ -427,6 +347,10 @@ export default function App() {
   });
 
   const handleRegenerateMap = useCallback((customPlayers?: any[]) => {
+    if (selectedLobby && selectedLobby.hostId !== myPlayerId) {
+      setLobbyValidationError('Host permission required: Only the lobby host can regenerate the map seed.');
+      return;
+    }
     const playersToUse = customPlayers || selectedLobby?.players || [];
     let generatedSeed = 0;
     if (window.regenerateDynamicSectorMap) {
@@ -441,7 +365,7 @@ export default function App() {
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({ type: 'c:regen_map', seed: finalSeed, clientKey: clientKeyRef.current }));
     }
-  }, [selectedLobby]);
+  }, [selectedLobby, myPlayerId]);
 
   const [lobbyMinerals, setLobbyMinerals] = useState<number>(200);
   const [lobbyAiAllyMode, setLobbyAiAllyMode] = useState<'defensive' | 'aggressive' | 'off'>('defensive');
@@ -533,6 +457,10 @@ export default function App() {
       setLobbyValidationError('No active multiplayer lobby selected.');
       return;
     }
+    if (selectedLobby.hostId !== myPlayerId) {
+      setLobbyValidationError('Host permission required: Only the lobby host can start the match.');
+      return;
+    }
     setLobbyValidationError(null);
 
     const activePlayers = Array.isArray(selectedLobby.players) ? [...selectedLobby.players] : [];
@@ -546,10 +474,12 @@ export default function App() {
     const lobbyConfigPayload = {
       id: selectedLobby.id,
       name: selectedLobby.name,
-      mode: selectedLobby.mode,
       mapBiome: activeBiome,
       seed: selectedLobby.seed || window.MAP_SEED || 100,
-      players: activePlayers
+      localPlayerId: myPlayerId,
+      players: activePlayers,
+      slots: activePlayers,
+      lobbyPlayers: activePlayers
     };
 
     if (typeof window.validateAndBuildMultiplayerRoster === 'function') {
@@ -580,7 +510,7 @@ export default function App() {
     window.loadingCameraSweep = true;
     setLoadingStage(1);
     setPhase('loading_match');
-  }, [selectedLobby, planetBiome, penaltyUntil]);
+  }, [selectedLobby, planetBiome, penaltyUntil, myPlayerId]);
 
   // Real 10-Stage World Initialization & Readiness Verification Pipeline
   useEffect(() => {
@@ -596,8 +526,8 @@ export default function App() {
 
     let cancelled = false;
     const activePlayers = isMultiplayerMatch && selectedLobby ? selectedLobby.players : [];
-    const humanSlot = activePlayers.find(p => !p.isAi);
-    const humanTeam = humanSlot ? (selectedLobby?.mode === 'ffa' ? 0 : humanSlot.team) : 1;
+    const localSlot = activePlayers.find(p => !p.isAi && p.id === myPlayerId) || activePlayers.find(p => !p.isAi);
+    const humanTeam = localSlot ? localSlot.team : 1;
     const allyBots = isMultiplayerMatch && selectedLobby
       ? activePlayers.filter(p => p.isAi && humanTeam !== 0 && p.team === humanTeam)
       : [];
@@ -608,12 +538,13 @@ export default function App() {
 
     const missionConfig = {
       isMultiplayer: isMultiplayerMatch,
-      mode: isMultiplayerMatch && selectedLobby ? selectedLobby.mode : 'campaign',
+      localPlayerId: myPlayerId,
       mapBiome: activeBiome,
       allyBots,
       enemyBots,
       lobbyPlayers: activePlayers,
       players: activePlayers,
+      slots: activePlayers,
       startingMinerals: isMultiplayerMatch ? lobbyMinerals : 200,
       aiAllyMode: isMultiplayerMatch ? (allyBots.length > 0 ? lobbyAiAllyMode : 'off') : 'defensive',
       botDifficulty: isMultiplayerMatch ? lobbyBotDiff : 'Hard',
@@ -648,7 +579,7 @@ export default function App() {
             setMapArchetypeDisplay(window.MAP_ARCHETYPE || 'open_badlands');
             setBridgeCountDisplay(window.BRIDGES ? window.BRIDGES.length : 0);
           }
-          if (step === 8 && isMultiplayerMatch && socketRef.current && socketRef.current.readyState === WebSocket.OPEN && selectedLobby) {
+          if (step === 8 && isMultiplayerMatch && socketRef.current && socketRef.current.readyState === WebSocket.OPEN && selectedLobby && selectedLobby.hostId === myPlayerId) {
             socketRef.current.send(JSON.stringify({ type: 'c:start_game', clientKey: clientKeyRef.current }));
           }
         }
@@ -672,7 +603,7 @@ export default function App() {
       cancelled = true;
       initRunningRef.current = false;
     };
-  }, [phase, isMultiplayerMatch, selectedLobby, planetBiome, lobbyMinerals, lobbyAiAllyMode, lobbyBotDiff, mapSeedDisplay, loadingRetryCount]);
+  }, [phase, isMultiplayerMatch, selectedLobby, planetBiome, lobbyMinerals, lobbyAiAllyMode, lobbyBotDiff, mapSeedDisplay, loadingRetryCount, myPlayerId]);
 
   // Establish Real WebSocket connection to backend server (/ws)
   const retryWebSocketConnection = useCallback(() => {
@@ -682,10 +613,12 @@ export default function App() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
     try {
+      setWsConnectionState('connecting');
       const ws = new WebSocket(wsUrl);
       socketRef.current = ws;
       ws.onopen = () => {
         setWsConnected(true);
+        setWsConnectionState('connected');
         setLobbyValidationError(null);
         ws.send(JSON.stringify({
           type: 'c:hello',
@@ -694,7 +627,18 @@ export default function App() {
         }));
         ws.send(JSON.stringify({ type: 'c:get_lobbies', clientKey: clientKeyRef.current }));
       };
-    } catch {}
+      ws.onclose = () => {
+        setWsConnected(false);
+        setWsConnectionState('offline');
+      };
+      ws.onerror = () => {
+        setWsConnected(false);
+        setWsConnectionState('offline');
+      };
+    } catch {
+      setWsConnected(false);
+      setWsConnectionState('offline');
+    }
   }, [myPlayerName]);
 
   useEffect(() => {
@@ -708,11 +652,13 @@ export default function App() {
       const wsUrl = `${protocol}//${window.location.host}/ws`;
 
       try {
+        setWsConnectionState('connecting');
         ws = new WebSocket(wsUrl);
         socketRef.current = ws;
 
         ws.onopen = () => {
           setWsConnected(true);
+          setWsConnectionState('connected');
           setLobbyValidationError(null);
           ws.send(JSON.stringify({
             type: 'c:hello',
@@ -727,7 +673,10 @@ export default function App() {
             const data = JSON.parse(event.data);
             switch (data.type) {
               case 's:init':
-                if (data.playerId) setMyPlayerId(data.playerId);
+                if (data.playerId) {
+                  setMyPlayerId(data.playerId);
+                  myPlayerIdRef.current = data.playerId;
+                }
                 if (data.name) {
                   setMyPlayerName(data.name);
                   setCommanderProfile(prev => ({ ...prev, callsign: data.name }));
@@ -794,8 +743,8 @@ export default function App() {
                 break;
               }
               case 's:share_resources': {
-                if (data.fromId && data.fromId !== myPlayerId) {
-                  if (data.toId === myPlayerId || data.toName === myPlayerName || data.toId === 'ally') {
+                if (data.fromId && data.fromId !== myPlayerIdRef.current) {
+                  if (data.toId === myPlayerIdRef.current || data.toName === myPlayerName || data.toId === 'ally') {
                     window.GAME_API?.receiveSharedResources?.(Number(data.minerals) || 0, Number(data.gems) || 0, data.fromName);
                   }
                 }
@@ -839,19 +788,20 @@ export default function App() {
                 window.loadingCameraSweep = false;
                 if (window.GAME_API) {
                   const lobbyPlayers = data.lobby?.players || [];
-                  const humanSlot = lobbyPlayers.find((p: any) => !p.isAi);
-                  const humanTeam = humanSlot ? (data.lobby?.mode === 'ffa' ? 0 : humanSlot.team) : 1;
+                  const localSlot = lobbyPlayers.find((p: any) => !p.isAi && p.id === myPlayerIdRef.current) || lobbyPlayers.find((p: any) => !p.isAi);
+                  const humanTeam = localSlot ? localSlot.team : 1;
                   const allyBots = lobbyPlayers.filter((p: any) => p.isAi && humanTeam !== 0 && p.team === humanTeam);
                   const enemyBots = lobbyPlayers.filter((p: any) => p.isAi && (humanTeam === 0 || p.team !== humanTeam));
                   window.GAME_API.startMission({
                     isMultiplayer: true,
-                    mode: data.lobby?.mode || '1v1',
+                    localPlayerId: myPlayerIdRef.current,
                     mapBiome: data.mapBiome || data.lobby?.mapBiome || 'highland',
                     seed: data.seed || data.lobby?.seed,
                     allyBots,
                     enemyBots,
                     lobbyPlayers,
                     players: lobbyPlayers,
+                    slots: lobbyPlayers,
                     startingMinerals: lobbyMinerals,
                     aiAllyMode: allyBots.length > 0 ? lobbyAiAllyMode : 'off',
                     botDifficulty: lobbyBotDiff,
@@ -869,7 +819,7 @@ export default function App() {
                 }
                 break;
               case 's:state_snapshot':
-                if (data.snapshot && data.senderId !== myPlayerId && window.GAME_API?.applyStateSnapshot) {
+                if (data.snapshot && data.senderId !== myPlayerIdRef.current && window.GAME_API?.applyStateSnapshot) {
                   window.GAME_API.applyStateSnapshot(data.snapshot);
                 }
                 break;
@@ -900,18 +850,23 @@ export default function App() {
 
         ws.onclose = () => {
           setWsConnected(false);
+          setWsConnectionState('offline');
           myMeasuredPingRef.current = 0;
           setMyMeasuredPing(0);
           reconnectTimeout = window.setTimeout(connect, 2500);
         };
 
-        ws.onerror = () => {
+        ws.onerror = (err) => {
+          console.warn('[MultiplayerWebSocket] /ws connection error:', err);
           setWsConnected(false);
+          setWsConnectionState('offline');
           myMeasuredPingRef.current = 0;
           setMyMeasuredPing(0);
         };
       } catch (e) {
+        console.warn('[MultiplayerWebSocket] /ws initialization error:', e);
         setWsConnected(false);
+        setWsConnectionState('offline');
         reconnectTimeout = window.setTimeout(connect, 3000);
       }
     }
@@ -1097,13 +1052,16 @@ export default function App() {
   };
 
   const syncLobbyPlayersToServer = (nextLobby: MultiplayerLobby) => {
+    if (nextLobby.hostId && nextLobby.hostId !== myPlayerId) {
+      setLobbyValidationError('Host permission required: Only the lobby host can modify room configuration.');
+      return;
+    }
     setSelectedLobby(nextLobby);
     setLobbyValidationError(null);
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({
         type: 'c:update_lobby_config',
         name: nextLobby.name,
-        mode: nextLobby.mode,
         mapBiome: nextLobby.mapBiome || planetBiome,
         seed: nextLobby.seed,
         players: nextLobby.players,
@@ -1142,50 +1100,117 @@ export default function App() {
     }
   };
 
-  const handleSelectLobbyMode = (nextMode: LobbyGameMode) => {
-    if (!selectedLobby) return;
-    const mySlot = selectedLobby.players.find(p => !p.isAi && (p.id === myPlayerId || p.name === myPlayerName)) || selectedLobby.players[0];
-    const humanFaction = mySlot?.faction || 'Terran Dominion';
-    const nextPlayers = nextMode === 'custom'
-      ? selectedLobby.players
-      : buildPresetPlayersForMode(nextMode, myPlayerId, myPlayerName, humanFaction, myMeasuredPing || 15, lobbyBotDiff);
-    syncLobbyPlayersToServer({
-      ...selectedLobby,
-      mode: nextMode,
-      players: nextPlayers
-    });
-    if (window.SFX) window.SFX.playClick();
-  };
-
   const handleUpdateSlotTeam = (slotId: string, nextTeam: 1 | 2 | 3 | 4 | 0) => {
     if (!selectedLobby) return;
+    if (selectedLobby.hostId !== myPlayerId) {
+      setLobbyValidationError('Host permission required: Only the lobby host can assign teams.');
+      return;
+    }
+    const target = selectedLobby.players.find(p => p.id === slotId);
     const updatedPlayers = selectedLobby.players.map(p => p.id === slotId ? { ...p, team: nextTeam } : p);
-    syncLobbyPlayersToServer({ ...selectedLobby, players: updatedPlayers });
+    setSelectedLobby({ ...selectedLobby, players: updatedPlayers });
+    setLobbyValidationError(null);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      if (target?.isAi) {
+        socketRef.current.send(JSON.stringify({
+          type: 'c:update_bot',
+          botId: slotId,
+          team: nextTeam,
+          clientKey: clientKeyRef.current
+        }));
+      } else {
+        socketRef.current.send(JSON.stringify({
+          type: 'c:update_lobby_config',
+          name: selectedLobby.name,
+          mapBiome: selectedLobby.mapBiome || planetBiome,
+          seed: selectedLobby.seed,
+          players: updatedPlayers,
+          clientKey: clientKeyRef.current
+        }));
+      }
+    }
     if (window.SFX) window.SFX.playClick();
   };
 
   const handleUpdateSlotFaction = (slotId: string, nextFaction: LobbyPlayer['faction']) => {
     if (!selectedLobby) return;
+    const isHost = selectedLobby.hostId === myPlayerId;
+    const target = selectedLobby.players.find(p => p.id === slotId);
+    const isSelf = !target?.isAi && (slotId === myPlayerId || target?.name === myPlayerName);
+
+    if (!isHost && !isSelf) {
+      setLobbyValidationError('Host permission required: Joiners can only change their own faction.');
+      return;
+    }
+
     const updatedPlayers = selectedLobby.players.map(p => p.id === slotId ? { ...p, faction: nextFaction } : p);
-    syncLobbyPlayersToServer({ ...selectedLobby, players: updatedPlayers });
+    setSelectedLobby({ ...selectedLobby, players: updatedPlayers });
+    setLobbyValidationError(null);
+
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      if (isSelf) {
+        socketRef.current.send(JSON.stringify({
+          type: 'c:update_player',
+          faction: nextFaction,
+          clientKey: clientKeyRef.current
+        }));
+      } else if (isHost && target?.isAi) {
+        socketRef.current.send(JSON.stringify({
+          type: 'c:update_bot',
+          botId: slotId,
+          faction: nextFaction,
+          clientKey: clientKeyRef.current
+        }));
+      } else if (isHost) {
+        socketRef.current.send(JSON.stringify({
+          type: 'c:update_lobby_config',
+          name: selectedLobby.name,
+          mapBiome: selectedLobby.mapBiome || planetBiome,
+          seed: selectedLobby.seed,
+          players: updatedPlayers,
+          clientKey: clientKeyRef.current
+        }));
+      }
+    }
     if (window.SFX) window.SFX.playClick();
   };
 
   const handleUpdateSlotDifficulty = (slotId: string, nextDiff: 'Easy' | 'Medium' | 'Hard' | 'Brutal') => {
     if (!selectedLobby) return;
+    if (selectedLobby.hostId !== myPlayerId) {
+      setLobbyValidationError('Host permission required: Only the lobby host can change AI difficulty.');
+      return;
+    }
     const updatedPlayers = selectedLobby.players.map(p => p.id === slotId ? { ...p, aiDifficulty: nextDiff } : p);
-    syncLobbyPlayersToServer({ ...selectedLobby, players: updatedPlayers });
+    setSelectedLobby({ ...selectedLobby, players: updatedPlayers });
+    setLobbyValidationError(null);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({
+        type: 'c:update_bot',
+        botId: slotId,
+        aiDifficulty: nextDiff,
+        clientKey: clientKeyRef.current
+      }));
+    }
     if (window.SFX) window.SFX.playClick();
   };
 
   const handleToggleMyReady = () => {
     if (!selectedLobby) return;
-    const mySlot = selectedLobby.players.find(p => p.id === myPlayerId || p.name === myPlayerName);
+    const mySlot = selectedLobby.players.find(p => !p.isAi && (p.id === myPlayerId || p.name === myPlayerName));
     const nextReady = mySlot ? !mySlot.ready : true;
     const updatedPlayers = selectedLobby.players.map(p =>
-      (p.id === myPlayerId || p.name === myPlayerName) ? { ...p, ready: nextReady } : p
+      (!p.isAi && (p.id === myPlayerId || p.name === myPlayerName)) ? { ...p, ready: nextReady } : p
     );
-    syncLobbyPlayersToServer({ ...selectedLobby, players: updatedPlayers });
+    setSelectedLobby({ ...selectedLobby, players: updatedPlayers });
+    setLobbyValidationError(null);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({
+        type: 'c:update_player',
+        ready: nextReady,
+        clientKey: clientKeyRef.current
+      }));
+    }
     if (window.SFX) window.SFX.playClick();
   };
 
@@ -1194,7 +1219,10 @@ export default function App() {
     preferredTeam: 1 | 2 | 3 | 4 | 0 = 2
   ) => {
     if (!selectedLobby || selectedLobby.players.length >= selectedLobby.maxPlayers) return;
-    const botTeam: 1 | 2 | 3 | 4 | 0 = selectedLobby.mode === 'ffa' ? 0 : preferredTeam;
+    if (selectedLobby.hostId !== myPlayerId) {
+      setLobbyValidationError('Host permission required: Only the lobby host can add AI opponents.');
+      return;
+    }
     const aiPool = [
       { name: 'Kerrigan_Brood', faction: 'Zerg Swarm' as const },
       { name: 'Artanis_Fleet', faction: 'Protoss Fleet' as const },
@@ -1202,33 +1230,35 @@ export default function App() {
       { name: 'Zagara_Swarm', faction: 'Zerg Swarm' as const },
       { name: 'Tassadar_Solaris', faction: 'Protoss Fleet' as const }
     ];
-    const pick = aiPool[selectedLobby.players.length % aiPool.length];
-    const newBot: LobbyPlayer = {
-      id: `bot_${Date.now()}_${Math.floor(Math.random() * 999)}`,
-      name: `[AI] ${pick.name}`,
-      isHost: false,
-      isAi: true,
-      aiDifficulty: diff,
-      team: botTeam,
-      faction: pick.faction,
-      ping: 0,
-      ready: true,
-      antiCheatVerified: true,
-      antiCheatFlags: 0
-    };
-    syncLobbyPlayersToServer({
-      ...selectedLobby,
-      players: [...selectedLobby.players, newBot]
-    });
+    const aiCount = selectedLobby.players.filter(p => p.isAi).length;
+    const pick = aiPool[aiCount % aiPool.length];
+    setLobbyValidationError(null);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({
+        type: 'c:add_bot',
+        difficulty: diff,
+        team: preferredTeam,
+        faction: pick.faction,
+        clientKey: clientKeyRef.current
+      }));
+    }
     if (window.SFX) window.SFX.playBuild();
   };
 
   const handleRemovePlayer = (id: string) => {
     if (!selectedLobby) return;
-    syncLobbyPlayersToServer({
-      ...selectedLobby,
-      players: selectedLobby.players.filter(p => p.id !== id)
-    });
+    if (selectedLobby.hostId !== myPlayerId) {
+      setLobbyValidationError('Host permission required: Only the lobby host can remove participants.');
+      return;
+    }
+    setLobbyValidationError(null);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({
+        type: 'c:remove_player',
+        targetId: id,
+        clientKey: clientKeyRef.current
+      }));
+    }
     if (window.SFX) window.SFX.playClick();
   };
 
@@ -1258,21 +1288,12 @@ export default function App() {
       return;
     }
     const hostFaction = (commanderProfile.preferredFaction === 'Protoss Solaris' ? 'Protoss Fleet' : commanderProfile.preferredFaction) as LobbyPlayer['faction'];
-    const initialPlayers = buildPresetPlayersForMode(
-      newRoomMode,
-      myPlayerId,
-      myPlayerName,
-      hostFaction,
-      myMeasuredPing || 15,
-      lobbyBotDiff
-    );
     setLobbyValidationError(null);
     socketRef.current.send(JSON.stringify({
       type: 'c:create_lobby',
       name: (newRoomName || 'Sector-09 Skirmish').trim(),
-      mode: newRoomMode,
       mapBiome: planetBiome,
-      initialPlayers,
+      faction: hostFaction,
       clientKey: clientKeyRef.current
     }));
     setShowCreateModal(false);
@@ -1280,7 +1301,7 @@ export default function App() {
     if (window.SFX) window.SFX.playBuild();
   };
 
-  const filteredLobbies = lobbies.filter(l => lobbyFilter === 'all' || l.mode === lobbyFilter);
+  const filteredLobbies = lobbies;
 
   const renderCommanderEmblem = (emblem: string, color = '#00e5ff') => {
     if (emblem === 'solaris_crest') {
@@ -1307,6 +1328,8 @@ export default function App() {
       </svg>
     );
   };
+
+  const isLocalHost = Boolean(selectedLobby && selectedLobby.hostId === myPlayerId);
 
   return (
     <div className="fixed inset-0 pointer-events-none z-20 select-none font-chakra">
@@ -1734,13 +1757,27 @@ export default function App() {
                 <div
                   data-testid="mp-connection-status"
                   className={`flex items-center gap-1.5 px-2 py-1 border text-[10px] sm:text-xs font-mono ${
-                    wsConnected
+                    wsConnectionState === 'connected'
                       ? 'bg-[#072219] border-[#00ff66]/60 text-[#00ff66]'
+                      : wsConnectionState === 'connecting'
+                      ? 'bg-[#1f1808] border-[#ffaa00] text-[#ffaa00]'
                       : 'bg-[#280810] border-[#ff2a4b] text-[#ff4d6d]'
                   }`}
                 >
-                  <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-[#00ff66]' : 'bg-[#ff2a4b]'}`} />
-                  <span>{wsConnected ? `ONLINE (${myMeasuredPing || 12}ms)` : 'SERVER OFFLINE'}</span>
+                  <span className={`w-2 h-2 rounded-full ${
+                    wsConnectionState === 'connected'
+                      ? 'bg-[#00ff66]'
+                      : wsConnectionState === 'connecting'
+                      ? 'bg-[#ffaa00]'
+                      : 'bg-[#ff2a4b]'
+                  }`} />
+                  <span>
+                    {wsConnectionState === 'connected'
+                      ? `CONNECTED (${myMeasuredPing || 12}ms)`
+                      : wsConnectionState === 'connecting'
+                      ? 'CONNECTING...'
+                      : 'OFFLINE'}
+                  </span>
                 </div>
 
                 {!wsConnected && (
@@ -1803,34 +1840,11 @@ export default function App() {
               </div>
             )}
 
-            {/* Filter Strip */}
+            {/* Active Rooms Count Bar */}
             <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-b border-[#1b3049] bg-[#07101c] shrink-0">
-              <div className="flex items-center gap-1 overflow-x-auto max-w-full">
-                {([
-                  { id: 'all', label: 'ALL' },
-                  { id: '1v1', label: '1V1' },
-                  { id: '1v2', label: '1V2' },
-                  { id: '1v3', label: '1V3' },
-                  { id: '2v2', label: '2V2' },
-                  { id: 'ffa', label: 'FFA' },
-                  { id: 'custom', label: 'CUSTOM' }
-                ] as const).map(tab => (
-                  <button
-                    key={tab.id}
-                    onClick={() => {
-                      setLobbyFilter(tab.id as any);
-                      if (window.SFX) window.SFX.playClick();
-                    }}
-                    className={`px-2.5 py-1 text-[10px] sm:text-xs font-bold uppercase border cursor-pointer whitespace-nowrap ${
-                      lobbyFilter === tab.id
-                        ? 'bg-[#00e5ff] text-[#040810] border-[#a5f3fc]'
-                        : 'bg-[#0a1626] border-[#223854] text-[#8eaecf] hover:text-white'
-                    }`}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
+              <span className="text-[10px] sm:text-xs font-mono text-[#00e5ff] uppercase font-bold">
+                ACTIVE MULTIPLAYER ROOMS
+              </span>
               <span className="text-[10px] sm:text-xs font-mono text-[#89a8cb]">
                 {filteredLobbies.length} {filteredLobbies.length === 1 ? 'ROOM' : 'ROOMS'}
               </span>
@@ -1879,9 +1893,6 @@ export default function App() {
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-bold text-xs sm:text-sm text-white truncate">
                           {lobby.name}
-                        </span>
-                        <span className="text-[10px] font-mono px-1.5 py-0.5 bg-[#14283d] text-[#00e5ff] border border-[#203c5c] uppercase">
-                          {lobby.mode.toUpperCase()}
                         </span>
                         <span className="text-[10px] font-mono px-1.5 py-0.5 bg-[#0d1c2e] text-[#93b7df] border border-[#1f3754] uppercase">
                           {(lobby.mapBiome || 'highland').toUpperCase()}
@@ -1936,26 +1947,44 @@ export default function App() {
                   data-testid="lobby-room-name-input"
                   type="text"
                   value={selectedLobby.name}
+                  disabled={!isLocalHost}
                   onChange={(e) => {
                     const nextName = e.target.value.slice(0, 40);
                     syncLobbyPlayersToServer({ ...selectedLobby, name: nextName });
                   }}
-                  className="min-w-0 flex-1 max-w-xs px-2 py-1 bg-[#050b14] border border-[#1f3754] focus:border-[#00e5ff] text-white font-bold text-xs sm:text-sm truncate focus:outline-none"
+                  className="min-w-0 flex-1 max-w-xs px-2 py-1 bg-[#050b14] border border-[#1f3754] focus:border-[#00e5ff] disabled:opacity-60 text-white font-bold text-xs sm:text-sm truncate focus:outline-none"
                   aria-label="Room Name"
                 />
+                <span className="text-[10px] font-mono px-1.5 py-0.5 bg-[#0b1929] border border-[#203c5c] text-[#00e5ff] uppercase shrink-0">
+                  {isLocalHost ? 'HOST' : `HOST: ${selectedLobby.hostName}`}
+                </span>
               </div>
 
               <div className="flex items-center gap-2">
                 <div
                   data-testid="lobby-ws-status"
                   className={`flex items-center gap-1.5 px-2 py-1 border text-[10px] sm:text-xs font-mono ${
-                    wsConnected
+                    wsConnectionState === 'connected'
                       ? 'bg-[#072219] border-[#00ff66]/60 text-[#00ff66]'
+                      : wsConnectionState === 'connecting'
+                      ? 'bg-[#1f1808] border-[#ffaa00] text-[#ffaa00]'
                       : 'bg-[#280810] border-[#ff2a4b] text-[#ff4d6d]'
                   }`}
                 >
-                  <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-[#00ff66]' : 'bg-[#ff2a4b]'}`} />
-                  <span>{wsConnected ? `CONNECTED (${myMeasuredPing || 12}ms)` : 'OFFLINE'}</span>
+                  <span className={`w-2 h-2 rounded-full ${
+                    wsConnectionState === 'connected'
+                      ? 'bg-[#00ff66]'
+                      : wsConnectionState === 'connecting'
+                      ? 'bg-[#ffaa00]'
+                      : 'bg-[#ff2a4b]'
+                  }`} />
+                  <span>
+                    {wsConnectionState === 'connected'
+                      ? `CONNECTED (${myMeasuredPing || 12}ms)`
+                      : wsConnectionState === 'connecting'
+                      ? 'CONNECTING...'
+                      : 'OFFLINE'}
+                  </span>
                 </div>
               </div>
             </div>
@@ -1977,43 +2006,12 @@ export default function App() {
               </div>
             )}
 
-            {/* 2. Essential Match Controls Bar: Game Mode & Map Selection */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 p-2.5 sm:p-3 border-b border-[#1b3049] bg-[#07101c] shrink-0">
-              {/* Game Mode Selector */}
+            {/* 2. Essential Match Controls Bar: Map Biome Selection */}
+            <div className="p-2.5 sm:p-3 border-b border-[#1b3049] bg-[#07101c] shrink-0">
               <div>
-                <div className="text-[10px] font-mono text-[#8faecf] uppercase mb-1">
-                  GAME MODE
-                </div>
-                <div className="grid grid-cols-6 gap-1">
-                  {([
-                    { id: '1v1', label: '1V1' },
-                    { id: '1v2', label: '1V2' },
-                    { id: '1v3', label: '1V3' },
-                    { id: '2v2', label: '2V2' },
-                    { id: 'ffa', label: 'FFA' },
-                    { id: 'custom', label: 'CUSTOM' }
-                  ] as const).map(m => (
-                    <button
-                      key={m.id}
-                      data-testid={`mode-btn-${m.id}`}
-                      type="button"
-                      onClick={() => handleSelectLobbyMode(m.id)}
-                      className={`py-1 text-[10px] sm:text-xs font-mono font-bold uppercase border cursor-pointer ${
-                        selectedLobby.mode === m.id
-                          ? 'bg-[#00e5ff] text-[#040810] border-[#a5f3fc]'
-                          : 'bg-[#091524] text-[#82a4c9] border-[#1f3754] hover:text-white'
-                      }`}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Map Biome Selection */}
-              <div>
-                <div className="text-[10px] font-mono text-[#8faecf] uppercase mb-1">
-                  MAP BIOME
+                <div className="flex items-center justify-between text-[10px] font-mono text-[#8faecf] uppercase mb-1">
+                  <span>MAP BIOME</span>
+                  <span className="text-[#00e5ff]">SEED #{selectedLobby.seed || mapSeedDisplay}</span>
                 </div>
                 <div className="grid grid-cols-5 gap-1">
                   {(['highland', 'ocean', 'lava', 'jungle', 'desert'] as const).map(b => {
@@ -2023,8 +2021,9 @@ export default function App() {
                         key={b}
                         data-testid={`biome-btn-${b}`}
                         type="button"
+                        disabled={!isLocalHost}
                         onClick={() => handleSelectPlanetBiome(b)}
-                        className={`py-1 text-[10px] sm:text-xs font-mono font-bold uppercase border cursor-pointer ${
+                        className={`py-1 text-[10px] sm:text-xs font-mono font-bold uppercase border cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
                           activeBiome === b
                             ? 'bg-[#00e5ff] text-[#040810] border-[#a5f3fc]'
                             : 'bg-[#091524] text-[#82a4c9] border-[#1f3754] hover:text-white'
@@ -2049,7 +2048,7 @@ export default function App() {
                     data-testid="add-ai-team1-btn"
                     type="button"
                     onClick={() => handleAddAiBot('Hard', 1)}
-                    disabled={selectedLobby.players.length >= selectedLobby.maxPlayers}
+                    disabled={!isLocalHost || selectedLobby.players.length >= selectedLobby.maxPlayers}
                     className="px-2.5 py-1 bg-[#0b2922] hover:bg-[#124236] disabled:opacity-40 text-[#00ff66] border border-[#1f6e58] text-[10px] sm:text-xs font-mono font-bold uppercase cursor-pointer"
                   >
                     + AI (TEAM 1)
@@ -2058,7 +2057,7 @@ export default function App() {
                     data-testid="add-ai-team2-btn"
                     type="button"
                     onClick={() => handleAddAiBot('Hard', 2)}
-                    disabled={selectedLobby.players.length >= selectedLobby.maxPlayers}
+                    disabled={!isLocalHost || selectedLobby.players.length >= selectedLobby.maxPlayers}
                     className="px-2.5 py-1 bg-[#261014] hover:bg-[#3b171e] disabled:opacity-40 text-[#ff4d6d] border border-[#5e1f2b] text-[10px] sm:text-xs font-mono font-bold uppercase cursor-pointer"
                   >
                     + AI (TEAM 2)
@@ -2104,9 +2103,10 @@ export default function App() {
                       <div className="sm:col-span-2">
                         <select
                           data-testid={`slot-team-select-${idx}`}
-                          value={selectedLobby.mode === 'ffa' ? 0 : p.team}
+                          value={p.team}
+                          disabled={!isLocalHost}
                           onChange={(e) => handleUpdateSlotTeam(p.id, Number(e.target.value) as any)}
-                          className="w-full px-2 py-1 bg-[#050b14] border border-[#244061] text-white font-mono text-[11px] uppercase focus:border-[#00e5ff] focus:outline-none"
+                          className="w-full px-2 py-1 bg-[#050b14] border border-[#244061] disabled:opacity-60 text-white font-mono text-[11px] uppercase focus:border-[#00e5ff] focus:outline-none"
                           aria-label={`Slot ${idx + 1} Team`}
                         >
                           <option value={1}>TEAM 1</option>
@@ -2122,8 +2122,9 @@ export default function App() {
                         <select
                           data-testid={`slot-faction-select-${idx}`}
                           value={p.faction === 'Protoss Solaris' ? 'Protoss Fleet' : p.faction}
+                          disabled={!isLocalHost && !isYou}
                           onChange={(e) => handleUpdateSlotFaction(p.id, e.target.value as any)}
-                          className="w-full px-2 py-1 bg-[#050b14] border border-[#244061] text-[#38bdf8] font-mono text-[11px] uppercase focus:border-[#00e5ff] focus:outline-none"
+                          className="w-full px-2 py-1 bg-[#050b14] border border-[#244061] disabled:opacity-60 text-[#38bdf8] font-mono text-[11px] uppercase focus:border-[#00e5ff] focus:outline-none"
                           aria-label={`Slot ${idx + 1} Faction`}
                         >
                           <option value="Terran Dominion">TERRAN DOMINION</option>
@@ -2132,15 +2133,16 @@ export default function App() {
                         </select>
                       </div>
 
-                      {/* AI Difficulty OR Human Ready Status + Remove AI */}
+                      {/* AI Difficulty OR Human Ready Status + Remove Participant */}
                       <div className="sm:col-span-3 flex items-center justify-end gap-1.5">
                         {p.isAi ? (
                           <>
                             <select
                               data-testid={`slot-difficulty-select-${idx}`}
                               value={p.aiDifficulty || 'Hard'}
+                              disabled={!isLocalHost}
                               onChange={(e) => handleUpdateSlotDifficulty(p.id, e.target.value as any)}
-                              className="flex-1 px-2 py-1 bg-[#050b14] border border-[#244061] text-[#ffaa00] font-mono text-[11px] uppercase focus:border-[#00e5ff] focus:outline-none"
+                              className="flex-1 px-2 py-1 bg-[#050b14] border border-[#244061] disabled:opacity-60 text-[#ffaa00] font-mono text-[11px] uppercase focus:border-[#00e5ff] focus:outline-none"
                               aria-label={`Slot ${idx + 1} AI Difficulty`}
                             >
                               <option value="Easy">EASY</option>
@@ -2148,15 +2150,17 @@ export default function App() {
                               <option value="Hard">HARD</option>
                               <option value="Brutal">BRUTAL</option>
                             </select>
-                            <button
-                              data-testid={`remove-slot-btn-${idx}`}
-                              type="button"
-                              onClick={() => handleRemovePlayer(p.id)}
-                              className="px-2 py-1 bg-[#2b0d14] hover:bg-[#ff2a4b] text-[#ff6b81] hover:text-white border border-[#5e1f2b] text-xs font-mono font-bold cursor-pointer shrink-0"
-                              title="Remove AI Slot"
-                            >
-                              ✕
-                            </button>
+                            {isLocalHost && (
+                              <button
+                                data-testid={`remove-slot-btn-${idx}`}
+                                type="button"
+                                onClick={() => handleRemovePlayer(p.id)}
+                                className="px-2 py-1 bg-[#2b0d14] hover:bg-[#ff2a4b] text-[#ff6b81] hover:text-white border border-[#5e1f2b] text-xs font-mono font-bold cursor-pointer shrink-0"
+                                title="Remove AI Slot"
+                              >
+                                ✕
+                              </button>
+                            )}
                           </>
                         ) : isYou ? (
                           <button
@@ -2172,11 +2176,24 @@ export default function App() {
                             {p.ready ? '✓ READY' : 'NOT READY'}
                           </button>
                         ) : (
-                          <span className={`px-2 py-1 text-[11px] font-mono font-bold uppercase ${
-                            p.ready ? 'text-[#00ff66]' : 'text-[#8faecf]'
-                          }`}>
-                            {p.ready ? 'READY' : 'WAITING'}
-                          </span>
+                          <>
+                            <span className={`px-2 py-1 text-[11px] font-mono font-bold uppercase ${
+                              p.ready ? 'text-[#00ff66]' : 'text-[#8faecf]'
+                            }`}>
+                              {p.ready ? 'READY' : 'WAITING'}
+                            </span>
+                            {isLocalHost && (
+                              <button
+                                data-testid={`remove-slot-btn-${idx}`}
+                                type="button"
+                                onClick={() => handleRemovePlayer(p.id)}
+                                className="px-2 py-1 bg-[#2b0d14] hover:bg-[#ff2a4b] text-[#ff6b81] hover:text-white border border-[#5e1f2b] text-xs font-mono font-bold cursor-pointer shrink-0"
+                                title="Remove Player"
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </>
                         )}
                       </div>
                     </div>
@@ -2195,8 +2212,9 @@ export default function App() {
                     <span>ROOM ID: {selectedLobby.id}</span>
                     <button
                       type="button"
+                      disabled={!isLocalHost}
                       onClick={() => handleRegenerateMap(selectedLobby.players)}
-                      className="px-2 py-0.5 bg-[#0d2238] hover:bg-[#00e5ff] text-[#00e5ff] hover:text-[#040810] border border-[#00e5ff]/60 uppercase cursor-pointer"
+                      className="px-2 py-0.5 bg-[#0d2238] hover:bg-[#00e5ff] disabled:opacity-40 text-[#00e5ff] hover:text-[#040810] border border-[#00e5ff]/60 uppercase cursor-pointer"
                     >
                       ⟳ NEW SEED
                     </button>
@@ -2248,10 +2266,11 @@ export default function App() {
               <button
                 data-testid="start-match-btn"
                 type="button"
+                disabled={!isLocalHost}
                 onClick={handleStartGame}
-                className="w-full sm:w-auto px-6 py-2.5 bg-[#00ff66] hover:bg-[#00e5ff] text-[#040810] font-black text-xs sm:text-sm tracking-widest uppercase border border-[#86efac] transition-colors cursor-pointer shadow-[0_0_20px_rgba(0,255,102,0.4)]"
+                className="w-full sm:w-auto px-6 py-2.5 bg-[#00ff66] hover:bg-[#00e5ff] disabled:opacity-40 disabled:cursor-not-allowed text-[#040810] font-black text-xs sm:text-sm tracking-widest uppercase border border-[#86efac] transition-colors cursor-pointer shadow-[0_0_20px_rgba(0,255,102,0.4)]"
               >
-                START MATCH &rarr;
+                {isLocalHost ? 'START MATCH →' : 'WAITING FOR HOST...'}
               </button>
             </div>
           </div>
@@ -2282,24 +2301,9 @@ export default function App() {
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-mono text-[#8faecf] uppercase mb-1">
-                  GAME MODE:
-                </label>
-                <select
-                  data-testid="create-room-mode-select"
-                  value={newRoomMode}
-                  onChange={(e) => setNewRoomMode(e.target.value as LobbyGameMode)}
-                  className="w-full px-3 py-2 bg-[#050b14] border border-[#213958] text-white text-xs font-mono focus:border-[#00e5ff] focus:outline-none"
-                >
-                  <option value="1v1">1v1 (1 Human vs 1 AI)</option>
-                  <option value="1v2">1v2 (1 Human vs 2 AI)</option>
-                  <option value="1v3">1v3 (1 Human vs 3 AI)</option>
-                  <option value="2v2">2v2 (2 Team 1 vs 2 Team 2)</option>
-                  <option value="ffa">Free-For-All (4-Way Solo)</option>
-                  <option value="custom">Custom Slots</option>
-                </select>
-              </div>
+              <p className="text-[11px] font-mono text-[#8faecf]">
+                Lobby opens with your slot on Team 1. Add AI opponents or invite human players directly inside the lobby.
+              </p>
 
               <div className="flex items-center justify-end gap-2.5 pt-2">
                 <button

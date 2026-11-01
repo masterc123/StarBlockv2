@@ -641,72 +641,260 @@ function generateProceduralTopographyParameters(customSeed) {
             makeArchipelagoIsland('island_flank', oppFlankX, oppFlankZ, 24.0, 22.0, seededRandom() * Math.PI, 1.18, true)
         );
 
+        const islPlayer = window.OCEAN_ISLANDS[0];
+        const islEnemy = window.OCEAN_ISLANDS[1];
+        const islSolaris = window.OCEAN_ISLANDS[2];
+        const islCentral = window.OCEAN_ISLANDS[3];
+        const islFlank = window.OCEAN_ISLANDS[4];
+
+        // Primary inter-island bridge corridors to keep clear of satellite islands
+        const plannedBridgePairs = [
+            [islPlayer, islCentral],
+            [islCentral, islEnemy],
+            [islCentral, islSolaris],
+            [islCentral, islFlank],
+            [islPlayer, islSolaris]
+        ];
+        const distToSegment2D = (px, pz, ax, az, bx, bz) => {
+            const vx = bx - ax, vz = bz - az;
+            const lenSq = vx * vx + vz * vz || 1.0;
+            const t = THREE.MathUtils.clamp(((px - ax) * vx + (pz - az) * vz) / lenSq, 0.0, 1.0);
+            return Math.hypot(px - (ax + vx * t), pz - (az + vz * t));
+        };
+
         const satCandidates = [
-            [(PLAYER_START_POS.x + SOLARIS_BASE_POS.x) * 0.52, (PLAYER_START_POS.z + SOLARIS_BASE_POS.z) * 0.52, 16.5, 14.0, 1.05],
-            [(ENEMY_BASE_POS.x + oppFlankX) * 0.52, (ENEMY_BASE_POS.z + oppFlankZ) * 0.52, 16.5, 14.0, 1.08],
-            [(PLAYER_START_POS.x + oppFlankX) * 0.52, (PLAYER_START_POS.z + oppFlankZ) * 0.52, 17.5, 15.0, 1.12],
-            [(ENEMY_BASE_POS.x + SOLARIS_BASE_POS.x) * 0.52, (ENEMY_BASE_POS.z + SOLARIS_BASE_POS.z) * 0.52, 17.5, 15.0, 1.10],
             [-78, 0, 15.5, 13.5, 0.96],
             [78, 0, 15.5, 13.5, 0.98],
             [0, -82, 15.0, 13.0, 0.94],
-            [0, 82, 15.0, 13.0, 0.95]
+            [0, 82, 15.0, 13.0, 0.95],
+            [(ENEMY_BASE_POS.x + oppFlankX) * 0.52, (ENEMY_BASE_POS.z + oppFlankZ) * 0.52, 15.5, 13.5, 1.06],
+            [(PLAYER_START_POS.x + oppFlankX) * 0.52, (PLAYER_START_POS.z + oppFlankZ) * 0.52, 16.0, 14.0, 1.08],
+            [(ENEMY_BASE_POS.x + SOLARIS_BASE_POS.x) * 0.52, (ENEMY_BASE_POS.z + SOLARIS_BASE_POS.z) * 0.52, 16.0, 14.0, 1.08]
         ];
         satCandidates.forEach(([sx, sz, srx, srz, sh], idx) => {
             const jx = THREE.MathUtils.clamp(Math.round(sx + (seededRandom() - 0.5) * 6.0), -94, 94);
             const jz = THREE.MathUtils.clamp(Math.round(sz + (seededRandom() - 0.5) * 6.0), -94, 94);
-            const clearExisting = window.OCEAN_ISLANDS.every(isl => Math.hypot(jx - isl.x, jz - isl.z) > (Math.max(isl.rx, isl.rz) + Math.max(srx, srz) - 3.5));
-            if (clearExisting) {
+            const maxSatR = Math.max(srx, srz);
+            const clearExisting = window.OCEAN_ISLANDS.every(isl => Math.hypot(jx - isl.x, jz - isl.z) > (Math.max(isl.rx, isl.rz) + maxSatR + 4.0));
+            const clearBridgeChannels = plannedBridgePairs.every(([a, b]) => distToSegment2D(jx, jz, a.x, a.z, b.x, b.z) > maxSatR + 12.0);
+            if (clearExisting && clearBridgeChannels) {
                 window.OCEAN_ISLANDS.push(
                     makeArchipelagoIsland(`island_sat_${idx + 1}`, jx, jz, srx, srz, seededRandom() * Math.PI, sh, false)
                 );
             }
         });
 
-        // Build long Terran-engineered inter-island causeway bridges spanning the deep ocean channels between islands
+        // Exact island height evaluator (without bridge grading) for coastline / shoreline intersection raymarching
+        const evalSingleIslandHeight = (isl, x, z) => {
+            const baseWave = Math.sin(x * HILL_FREQ_1 + MAP_SEED) * Math.cos(z * HILL_FREQ_1 + MAP_SEED) * HILL_AMP_1
+                + Math.sin(x * HILL_FREQ_2 - z * (HILL_FREQ_2 * 1.22) + MAP_SEED * 0.5) * HILL_AMP_2;
+            const dx = x - isl.x;
+            const dz = z - isl.z;
+            const lx = dx * isl.cosR + dz * isl.sinR;
+            const lz = -dx * isl.sinR + dz * isl.cosR;
+            const ang = Math.atan2(lz, lx);
+            const coastMod = 1.0
+                + 0.15 * Math.sin(ang * 3.0 + isl.lobePhase1)
+                + 0.10 * Math.cos(ang * 5.0 + isl.lobePhase2)
+                + 0.06 * Math.sin(ang * 7.0 + (isl.lobePhase3 || 1.2))
+                - 0.12 * Math.exp(-Math.pow(Math.atan2(Math.sin(ang - isl.coveAngle), Math.cos(ang - isl.coveAngle)) * 2.4, 2));
+            const effRx = isl.rx * coastMod;
+            const effRz = isl.rz * coastMod;
+            const normR = Math.hypot(lx / effRx, lz / effRz);
+            if (normR >= 1.55) return -1.42;
+            if (normR <= 0.64) {
+                const inlandT = normR / 0.64;
+                const bluffRing = Math.pow(Math.sin(inlandT * Math.PI), 1.6) * 0.24 * (0.5 + 0.5 * Math.sin(ang * 2.0 + isl.lobePhase1));
+                const baseElevation = isl.isMajor ? 0.68 : 0.62;
+                return baseElevation + bluffRing * isl.peakH + baseWave * 0.12;
+            }
+            if (normR <= 0.96) {
+                const beachT = (normR - 0.64) / 0.32;
+                const sBeach = beachT * beachT * (3.0 - 2.0 * beachT);
+                const rimBase = (isl.isMajor ? 0.68 : 0.62) + baseWave * 0.08;
+                const beachShelf = 0.22 * Math.sin(beachT * Math.PI);
+                return THREE.MathUtils.lerp(rimBase, -0.06, sBeach) + beachShelf * 0.35;
+            }
+            if (normR <= 1.26) {
+                const shoalT = (normR - 0.96) / 0.30;
+                const sShoal = shoalT * shoalT * (3.0 - 2.0 * shoalT);
+                return THREE.MathUtils.lerp(-0.06, -0.46, sShoal);
+            }
+            const deepT = (normR - 1.26) / 0.29;
+            const sDeep = deepT * deepT * (3.0 - 2.0 * deepT);
+            return THREE.MathUtils.lerp(-0.46, -1.42, sDeep);
+        };
+
+        const evalAllIslandsHeight = (x, z) => {
+            let bestH = -1.42 + Math.sin(x * 0.055 + MAP_SEED) * Math.cos(z * 0.055) * 0.16;
+            for (let i = 0; i < window.OCEAN_ISLANDS.length; i++) {
+                const ih = evalSingleIslandHeight(window.OCEAN_ISLANDS[i], x, z);
+                if (ih > bestH) bestH = ih;
+            }
+            return bestH;
+        };
+
+        // Geometry-aware long bridge placement between distinct islands:
+        // 1. Raymarches actual island coastlines to find exact shoreline intersections.
+        // 2. Verifies the bridge deck spans open water and never cuts through any island interior.
+        // 3. Verifies both approach ramps terminate on walkable terrain above water.
+        // 4. Verifies clearance from other bridges and structures, testing lateral offset candidates if needed.
         const createIslandBridgeLink = (islA, islB, bIdx, archType) => {
-            if (!islA || !islB) return;
-            const dx = islB.x - islA.x;
-            const dz = islB.z - islA.z;
-            const dist = Math.hypot(dx, dz) || 1.0;
-            const dirX = dx / dist;
-            const dirZ = dz / dist;
+            if (!islA || !islB || islA.id === islB.id) return false;
+            const baseDx = islB.x - islA.x;
+            const baseDz = islB.z - islA.z;
+            const baseDist = Math.hypot(baseDx, baseDz);
+            if (!Number.isFinite(baseDist) || baseDist < 12.0) return false;
 
-            // Place bridge abutments well inside each island's coastal shelf so ramps land on dry ground
-            const shoreA = Math.min(islA.rx, islA.rz) * 0.62;
-            const shoreB = Math.min(islB.rx, islB.rz) * 0.62;
-            const ax = islA.x + dirX * shoreA;
-            const az = islA.z + dirZ * shoreA;
-            const bx = islB.x - dirX * shoreB;
-            const bz = islB.z - dirZ * shoreB;
+            const baseDirX = baseDx / baseDist;
+            const baseDirZ = baseDz / baseDist;
+            const perpX = -baseDirZ;
+            const perpZ = baseDirX;
 
-            const cx = (ax + bx) * 0.5;
-            const cz = (az + bz) * 0.5;
-            const gapLen = Math.max(16.0, Math.hypot(bx - ax, bz - az));
-            const flatHalfSpan = gapLen * 0.5 + 1.5;
-            const rampReachU = flatHalfSpan + 5.2;
-            // bridgeLocalToWorld maps localU along (sinYaw, cosYaw); set bridgeYaw = atan2(dirX, dirZ) so +localU points from A to B!
+            const shoreElevThreshold = WATER_LEVEL + 0.18; // ~0.00m dry shoreline edge above water (-0.18m)
+            const rampLength = 4.6;
+            const bHalfW = 4.9;
+            const lateralOffsets = [0, -3.5, 3.5, -7.0, 7.0, -10.5, 10.5];
+
+            let chosenCandidate = null;
+
+            for (let cIdx = 0; cIdx < lateralOffsets.length; cIdx++) {
+                const latOff = lateralOffsets[cIdx];
+                const startX = islA.x + perpX * latOff;
+                const startZ = islA.z + perpZ * latOff;
+                const endX = islB.x + perpX * latOff;
+                const endZ = islB.z + perpZ * latOff;
+
+                const dirX = (endX - startX) / baseDist;
+                const dirZ = (endZ - startZ) / baseDist;
+
+                // Step 1: Raymarch outward from islA center to find exact coastline exit into water
+                let sShoreA = null;
+                const step = 0.5;
+                const maxSearchA = Math.min(baseDist * 0.65, Math.max(islA.rx, islA.rz) * 1.35);
+                for (let s = 4.0; s <= maxSearchA; s += step) {
+                    const px = startX + dirX * s;
+                    const pz = startZ + dirZ * s;
+                    const hA = evalSingleIslandHeight(islA, px, pz);
+                    if (hA > shoreElevThreshold) {
+                        sShoreA = s;
+                    } else if (sShoreA !== null && hA <= WATER_LEVEL + 0.05) {
+                        break;
+                    }
+                }
+
+                // Step 2: Raymarch outward from islB center toward islA to find exact coastline exit on islB
+                let sFromB = null;
+                const maxSearchB = Math.min(baseDist * 0.65, Math.max(islB.rx, islB.rz) * 1.35);
+                for (let s = 4.0; s <= maxSearchB; s += step) {
+                    const px = endX - dirX * s;
+                    const pz = endZ - dirZ * s;
+                    const hB = evalSingleIslandHeight(islB, px, pz);
+                    if (hB > shoreElevThreshold) {
+                        sFromB = s;
+                    } else if (sFromB !== null && hB <= WATER_LEVEL + 0.05) {
+                        break;
+                    }
+                }
+
+                if (sShoreA === null || sFromB === null) continue;
+                const sShoreB = baseDist - sFromB;
+                const waterSpanLen = sShoreB - sShoreA;
+                if (waterSpanLen < 8.0) continue;
+
+                // Step 3: Verify the bridge deck spans water rather than extending through any island interior
+                let spansOnlyWater = true;
+                for (let s = sShoreA + 1.5; s <= sShoreB - 1.5; s += 1.0) {
+                    const px = startX + dirX * s;
+                    const pz = startZ + dirZ * s;
+                    const hAll = evalAllIslandsHeight(px, pz);
+                    if (hAll > WATER_LEVEL + 0.14) {
+                        spansOnlyWater = false;
+                        break;
+                    }
+                    // Also check lateral edges of the deck
+                    for (const side of [-bHalfW, bHalfW]) {
+                        const lpx = px + perpX * side;
+                        const lpz = pz + perpZ * side;
+                        if (evalAllIslandsHeight(lpx, lpz) > WATER_LEVEL + 0.18) {
+                            spansOnlyWater = false;
+                            break;
+                        }
+                    }
+                    if (!spansOnlyWater) break;
+                }
+                if (!spansOnlyWater) continue;
+
+                // Step 4: Verify both approach ramps terminate on walkable terrain above water on islA and islB
+                const sToeA = Math.max(2.0, sShoreA - rampLength);
+                const sToeB = Math.min(baseDist - 2.0, sShoreB + rampLength);
+                const toeAX = startX + dirX * sToeA;
+                const toeAZ = startZ + dirZ * sToeA;
+                const toeBX = startX + dirX * sToeB;
+                const toeBZ = startZ + dirZ * sToeB;
+                const toeAH = evalSingleIslandHeight(islA, toeAX, toeAZ);
+                const toeBH = evalSingleIslandHeight(islB, toeBX, toeBZ);
+                if (toeAH < WATER_LEVEL + 0.30 || toeBH < WATER_LEVEL + 0.30) continue;
+
+                // Step 5: Check clearance from existing bridges
+                const shoreAX = startX + dirX * sShoreA;
+                const shoreAZ = startZ + dirZ * sShoreA;
+                const shoreBX = startX + dirX * sShoreB;
+                const shoreBZ = startZ + dirZ * sShoreB;
+                const cx = (shoreAX + shoreBX) * 0.5;
+                const cz = (shoreAZ + shoreBZ) * 0.5;
+
+                const clearOfOtherBridges = RIVER_BRIDGES.every(other => {
+                    const centerDist = Math.hypot(cx - other.centerX, cz - other.centerZ);
+                    return centerDist > (bHalfW + other.halfWidth + 6.0);
+                });
+                if (!clearOfOtherBridges) continue;
+
+                chosenCandidate = {
+                    dirX, dirZ,
+                    shoreAX, shoreAZ, shoreAY: evalAllIslandsHeight(shoreAX, shoreAZ),
+                    shoreBX, shoreBZ, shoreBY: evalAllIslandsHeight(shoreBX, shoreBZ),
+                    toeAX, toeAZ, toeAH,
+                    toeBX, toeBZ, toeBH,
+                    cx, cz,
+                    waterSpanLen
+                };
+                break;
+            }
+
+            if (!chosenCandidate) return false;
+
+            const { dirX, dirZ, shoreAX, shoreAZ, shoreAY, shoreBX, shoreBZ, shoreBY, toeAH, toeBH, cx, cz, waterSpanLen } = chosenCandidate;
+            // Flat deck spans the water channel between the two shorelines (+0.45m abutment seat on each shore)
+            const flatHalfSpan = waterSpanLen * 0.5 + 0.45;
+            const rampReachU = flatHalfSpan + rampLength;
             const bridgeYaw = Math.atan2(dirX, dirZ);
             const cosYaw = Math.cos(bridgeYaw);
             const sinYaw = Math.sin(bridgeYaw);
-            const bHalfW = 4.9;
             const rcMid = getRiverCoords(cx, cz);
 
             const rbObj = {
-                id: `bridge_${bIdx + 1}`,
-                index: bIdx,
+                id: `bridge_${RIVER_BRIDGES.length + 1}`,
+                index: RIVER_BRIDGES.length,
                 isCustomIslandBridge: true,
                 islandAId: islA.id,
                 islandBId: islB.id,
+                shorelineA: { x: shoreAX, y: shoreAY, z: shoreAZ },
+                shorelineB: { x: shoreBX, y: shoreBY, z: shoreBZ },
+                northToeElevation: toeAH,
+                southToeElevation: toeBH,
                 sCoord: rcMid.s,
                 centerU: rcMid.u,
                 centerX: cx,
                 centerZ: cz,
+                worldX: cx,
+                worldZ: cz,
                 yaw: bridgeYaw,
                 cosYaw,
                 sinYaw,
                 tangentSlope: 0,
                 halfWidth: bHalfW,
-                riverHalfW: flatHalfSpan - 1.0,
+                riverHalfW: waterSpanLen * 0.5,
                 flatHalfSpan,
                 rampReachU,
                 archetype: archType,
@@ -736,13 +924,9 @@ function generateProceduralTopographyParameters(customSeed) {
                 northEntry: northEntryVec,
                 bridgeRef: rbObj
             });
+            return true;
         };
 
-        const islPlayer = window.OCEAN_ISLANDS[0];
-        const islEnemy = window.OCEAN_ISLANDS[1];
-        const islSolaris = window.OCEAN_ISLANDS[2];
-        const islCentral = window.OCEAN_ISLANDS[3];
-        const islFlank = window.OCEAN_ISLANDS[4];
         createIslandBridgeLink(islPlayer, islCentral, 0, 'truss_bridge');
         createIslandBridgeLink(islCentral, islEnemy, 1, 'industrial_girder');
         createIslandBridgeLink(islCentral, islSolaris, 2, 'concrete_causeway');
@@ -758,14 +942,16 @@ function generateProceduralTopographyParameters(customSeed) {
 
         for (let b = 0; b < BRIDGE_COUNT; b++) {
             let sPos = spanSpread[b] + (seededRandom() - 0.5) * 8.5;
-            // Refine sPos slightly toward a gentle river tangent section so bridges sit at natural geological crossings
+            // Refine sPos toward a gentle river tangent section with valid clearance from other bridges
             let bestS = sPos;
-            let bestSlope = Math.abs(getRiverTangentSlopeAtS(sPos));
-            for (let step = -3.0; step <= 3.0; step += 0.75) {
+            let bestScore = Infinity;
+            for (let step = -5.0; step <= 5.0; step += 0.75) {
                 const candS = sPos + step;
+                const clearOther = RIVER_BRIDGES.every(other => Math.abs(candS - other.sCoord) >= 14.0);
+                if (!clearOther) continue;
                 const candSlope = Math.abs(getRiverTangentSlopeAtS(candS));
-                if (candSlope < bestSlope) {
-                    bestSlope = candSlope;
+                if (candSlope < bestScore) {
+                    bestScore = candSlope;
                     bestS = candS;
                 }
             }
@@ -780,18 +966,24 @@ function generateProceduralTopographyParameters(customSeed) {
             const cosYaw = Math.cos(bridgeYaw);
             const sinYaw = Math.sin(bridgeYaw);
 
-            const effRiverHalfW = RIVER_HALF_WIDTH * Math.sqrt(1.0 + tangentSlope * tangentSlope);
-            const flatHalfSpan = effRiverHalfW + 1.05;
-            const rampReachU = effRiverHalfW + 3.65;
+            const localHalfW = (typeof getRiverHalfWidthAtS === 'function') ? getRiverHalfWidthAtS(sPos) : RIVER_HALF_WIDTH;
+            const effRiverHalfW = localHalfW * Math.sqrt(1.0 + tangentSlope * tangentSlope);
+            const flatHalfSpan = effRiverHalfW + 0.95;
+            const rampReachU = flatHalfSpan + 3.4;
             const arch = bridgeArchetypes[(b + Math.floor(seededRandom() * 3)) % bridgeArchetypes.length];
 
             const rbObj = {
                 id: `bridge_${b + 1}`,
                 index: b,
+                isCustomIslandBridge: false,
+                islandAId: 'north_riverbank',
+                islandBId: 'south_riverbank',
                 sCoord: sPos,
                 centerU: cU,
                 centerX: cW.x,
                 centerZ: cW.z,
+                worldX: cW.x,
+                worldZ: cW.z,
                 yaw: bridgeYaw,
                 cosYaw,
                 sinYaw,
@@ -805,6 +997,11 @@ function generateProceduralTopographyParameters(customSeed) {
                 maxHp: 1200,
                 destroyed: false
             };
+
+            const shoreNorth = bridgeLocalToWorld(rbObj, 0, -effRiverHalfW);
+            const shoreSouth = bridgeLocalToWorld(rbObj, 0, effRiverHalfW);
+            rbObj.shorelineA = { x: shoreNorth.x, y: WATER_LEVEL, z: shoreNorth.z };
+            rbObj.shorelineB = { x: shoreSouth.x, y: WATER_LEVEL, z: shoreSouth.z };
             RIVER_BRIDGES.push(rbObj);
 
             const sW = bridgeLocalToWorld(rbObj, 0, rampReachU);
@@ -881,8 +1078,8 @@ function generateProceduralTopographyParameters(customSeed) {
             if (isl.isMajor || idx < 6) {
                 const rAng = Math.atan2(-isl.z, -isl.x);
                 BASE_TERRAIN_ZONES.push({
-                    id: isl.id,
-                    faction: idx === 0 ? 'player' : (idx === 2 ? 'solaris' : `island_faction_${idx}`),
+                    id: idx === 0 ? 'player_main' : (idx === 1 ? 'enemy_main' : isl.id),
+                    faction: idx === 0 ? 'player' : (idx === 1 ? 'enemy' : (idx === 2 ? 'solaris' : `island_faction_${idx}`)),
                     mode: 'no_ramp',
                     x: isl.x,
                     z: isl.z,
@@ -892,7 +1089,8 @@ function generateProceduralTopographyParameters(customSeed) {
                     rampDirX: Math.cos(rAng),
                     rampDirZ: Math.sin(rAng),
                     rampHalfW: 4.8,
-                    isPrimaryPlayer: idx === 0
+                    isPrimaryPlayer: idx === 0,
+                    isPrimaryEnemy: idx === 1
                 });
             }
         });
@@ -920,6 +1118,22 @@ function generateProceduralTopographyParameters(customSeed) {
             rampHalfW: Math.max(PLAYER_BASE_RAMP_HALF_W, 5.2),
             isPrimaryPlayer: true,
             isCornerPlatform: true
+        });
+
+        const enemyRampAng = Math.atan2((PLAYER_START_POS.z * 0.35) - ENEMY_BASE_POS.z, (PLAYER_START_POS.x * 0.35) - ENEMY_BASE_POS.x);
+        BASE_TERRAIN_ZONES.push({
+            id: 'enemy_main',
+            faction: 'enemy',
+            mode: 'no_ramp',
+            x: ENEMY_BASE_POS.x,
+            z: ENEMY_BASE_POS.z,
+            radius: 21.0,
+            rimOuter: 27.0,
+            heightDelta: 0.65,
+            rampDirX: Math.cos(enemyRampAng),
+            rampDirZ: Math.sin(enemyRampAng),
+            rampHalfW: 5.2,
+            isPrimaryEnemy: true
         });
 
         const solRampAng = Math.atan2(-SOLARIS_BASE_POS.z, -SOLARIS_BASE_POS.x);
@@ -1338,22 +1552,30 @@ function computeRawTerrainHeight(x, z) {
         }
         h = bestIslandH;
 
-        // Grade inter-island bridge approach causeway headlands on the island shores so bridge ramps connect with zero gaps
+        // Carve channel beneath inter-island bridge decks and grade approach ramp abutments so terrain never overlaps the bridge deck
         for (let bIdx = 0; bIdx < RIVER_BRIDGES.length; bIdx++) {
             const rb = RIVER_BRIDGES[bIdx];
             const bc = getBridgeLocalCoords(rb, x, z);
             const dU = Math.abs(bc.localU);
             const dS = Math.abs(bc.localS);
             const flatSpan = rb.flatHalfSpan || 14.0;
-            const rampReach = rb.rampReachU || (flatSpan + 5.2);
-            if (dU >= flatSpan - 1.2 && dU <= rampReach + 4.5 && dS <= rb.halfWidth + 3.6) {
-                const uCenter = (flatSpan + rampReach) * 0.5;
-                const uHalf = (rampReach - flatSpan) * 0.5 + 2.8;
-                const uBlend = THREE.MathUtils.clamp(1.0 - Math.abs(dU - uCenter) / uHalf, 0.0, 1.0);
-                const sBlend = dS <= rb.halfWidth ? 1.0 : THREE.MathUtils.clamp(1.0 - (dS - rb.halfWidth) / 3.6, 0.0, 1.0);
-                const w = uBlend * uBlend * (3.0 - 2.0 * uBlend) * sBlend;
-                if (w > 0.01) {
-                    h = Math.max(h, THREE.MathUtils.lerp(h, 0.36, w));
+            const rampReach = rb.rampReachU || (flatSpan + 4.6);
+
+            if (dU < flatSpan - 0.35 && dS <= rb.halfWidth + 1.6) {
+                const sBlend = dS <= rb.halfWidth + 0.35 ? 1.0 : THREE.MathUtils.clamp(1.0 - (dS - (rb.halfWidth + 0.35)) / 1.25, 0.0, 1.0);
+                const carvedChannelY = Math.min(h, WATER_LEVEL - 0.30);
+                h = THREE.MathUtils.lerp(h, carvedChannelY, sBlend);
+            } else if (dU >= flatSpan - 0.35 && dU <= rampReach + 2.4 && dS <= rb.halfWidth + 3.0) {
+                const sBlend = dS <= rb.halfWidth ? 1.0 : THREE.MathUtils.clamp(1.0 - (dS - rb.halfWidth) / 3.0, 0.0, 1.0);
+                const rampSpanLen = Math.max(1.0, rampReach - (flatSpan - 0.35));
+                const rampT = THREE.MathUtils.clamp((dU - (flatSpan - 0.35)) / rampSpanLen, 0.0, 1.0);
+                const smoothRampT = rampT * rampT * (3.0 - 2.0 * rampT);
+                const targetInlandH = Math.max(0.28, Math.min(0.68, h));
+                const gradedAbutmentY = THREE.MathUtils.lerp(0.24, targetInlandH, smoothRampT);
+                const outerFade = dU <= rampReach ? 1.0 : THREE.MathUtils.clamp(1.0 - (dU - rampReach) / 2.4, 0.0, 1.0);
+                const w = sBlend * outerFade;
+                if (w > 0.005) {
+                    h = THREE.MathUtils.lerp(h, gradedAbutmentY, w);
                 }
             }
         }
@@ -1612,19 +1834,30 @@ function computeRawTerrainHeight(x, z) {
                 }
             }
         }
-        // Grade bridge approach abutments on the banks/shorelines so terrain-to-bridge ramp transitions are 100% flush
+        // Carve channel beneath river bridge decks and grade approach abutments on the banks so terrain never overlaps the bridge deck
         for (let bIdx = 0; bIdx < RIVER_BRIDGES.length; bIdx++) {
             const rb = RIVER_BRIDGES[bIdx];
             const bc = getBridgeLocalCoords(rb, x, z);
             const dU = Math.abs(bc.localU);
             const dS = Math.abs(bc.localS);
-            const effHalfW = rb.flatHalfSpan ? (rb.flatHalfSpan - 0.8) : (rb.riverHalfW || RIVER_HALF_WIDTH);
-            if (dU > effHalfW && dU < effHalfW + 6.0 && dS < rb.halfWidth + 2.4) {
-                const uBlend = 1.0 - Math.abs((dU - (effHalfW + 3.0)) / 3.0);
-                const sBlend = dS <= rb.halfWidth ? 1.0 : Math.max(0.0, 1.0 - (dS - rb.halfWidth) / 2.4);
-                const abutWeight = THREE.MathUtils.clamp(uBlend * sBlend, 0.0, 1.0);
+            const flatSpan = rb.flatHalfSpan || ((rb.riverHalfW || RIVER_HALF_WIDTH) + 0.95);
+            const rampReach = rb.rampReachU || (flatSpan + 3.4);
+
+            if (dU < flatSpan - 0.35 && dS <= rb.halfWidth + 1.5) {
+                const sBlend = dS <= rb.halfWidth + 0.35 ? 1.0 : THREE.MathUtils.clamp(1.0 - (dS - (rb.halfWidth + 0.35)) / 1.15, 0.0, 1.0);
+                const carvedChannelY = Math.min(h, WATER_LEVEL - 0.28);
+                h = THREE.MathUtils.lerp(h, carvedChannelY, sBlend);
+            } else if (dU >= flatSpan - 0.35 && dU <= rampReach + 2.4 && dS <= rb.halfWidth + 2.6) {
+                const sBlend = dS <= rb.halfWidth ? 1.0 : Math.max(0.0, 1.0 - (dS - rb.halfWidth) / 2.6);
+                const rampSpanLen = Math.max(1.0, rampReach - (flatSpan - 0.35));
+                const rampT = THREE.MathUtils.clamp((dU - (flatSpan - 0.35)) / rampSpanLen, 0.0, 1.0);
+                const smoothRampT = rampT * rampT * (3.0 - 2.0 * rampT);
+                const targetBankH = Math.max(0.24, Math.min(0.62, h));
+                const gradedAbutmentY = THREE.MathUtils.lerp(0.22, targetBankH, smoothRampT);
+                const outerFade = dU <= rampReach ? 1.0 : THREE.MathUtils.clamp(1.0 - (dU - rampReach) / 2.4, 0.0, 1.0);
+                const abutWeight = THREE.MathUtils.clamp(sBlend * outerFade, 0.0, 1.0);
                 if (abutWeight > 0.01) {
-                    h = THREE.MathUtils.lerp(h, 0.26, abutWeight * 0.85);
+                    h = THREE.MathUtils.lerp(h, gradedAbutmentY, abutWeight);
                 }
             }
         }
@@ -3134,6 +3367,11 @@ const _localUnitBlockerScratch = [];
 
 function computeSafeGroundStep(currPos, targetPos, speed, dt, selfActor = null, blockerList = null, buildingsList = null, enemyBuildingsList = null) {
     const _navT0 = (window.PERF_PROFILER && window.PERF_PROFILER.enabled) ? performance.now() : 0;
+    const explicitRadius = typeof selfActor === 'number' && Number.isFinite(selfActor) ? selfActor : null;
+    if (typeof selfActor !== 'object' || selfActor === null) {
+        selfActor = (typeof buildingsList === 'object' && buildingsList !== null && !Array.isArray(buildingsList)) ? buildingsList : null;
+        if (selfActor === buildingsList) buildingsList = null;
+    }
     if (selfActor && selfActor.bridgeClearedTimer > 0) {
         selfActor.bridgeClearedTimer = Math.max(0, selfActor.bridgeClearedTimer - dt);
     }
@@ -3145,7 +3383,7 @@ function computeSafeGroundStep(currPos, targetPos, speed, dt, selfActor = null, 
         return _stepReturnScratch.set(0, 0, 0);
     }
 
-    const selfRad = (selfActor && selfActor.radius) ? selfActor.radius : 0.52;
+    const selfRad = explicitRadius || ((selfActor && selfActor.radius) ? selfActor.radius : 0.52);
     const isTank = !!(selfActor && (selfActor.type === 'tank' || selfActor.type === 'siege_tank'));
     const structCircles = gatherStructureBlockers(selfRad, buildingsList, enemyBuildingsList);
 
@@ -6406,6 +6644,10 @@ function createValleyRiver() {
             const asphPosArr = [];
             const asphIdxArr = [];
 
+            const toeCenterPt = bridgeLocalToWorld(rb, 0, endSign * rampReachU);
+            const rawToeCenterH = getTerrainHeight(toeCenterPt.x, toeCenterPt.z);
+            const safeToeCenterY = (Number.isFinite(rawToeCenterH) ? Math.max(WATER_LEVEL + 0.16, rawToeCenterH) : 0.35) + 0.064;
+
             for (let iu = 0; iu <= rStepsU; iu++) {
                 const tU = iu / rStepsU;
                 const localZ = endSign * THREE.MathUtils.lerp(flatHalfSpan, rampReachU, tU);
@@ -6415,14 +6657,24 @@ function createValleyRiver() {
                     const tS = (is / rStepsS) - 0.5;
                     const localX = tS * bridgeWidth;
                     const wPt = bridgeLocalToWorld(rb, localX, localZ);
-                    const groundY = getTerrainHeight(wPt.x, wPt.z) + 0.064;
-                    const topY = THREE.MathUtils.lerp(0.35, groundY, smoothRamp);
+                    const rawG = getTerrainHeight(wPt.x, wPt.z);
+                    const groundY = (Number.isFinite(rawG) ? rawG : 0.25) + 0.064;
+                    const topY = iu === 0
+                        ? 0.35
+                        : (iu === rStepsU
+                            ? Math.max(WATER_LEVEL + 0.16, groundY)
+                            : Math.max(THREE.MathUtils.lerp(0.35, safeToeCenterY, smoothRamp), groundY + 0.045));
                     rPosArr.push(localX, topY, localZ);
 
                     const asphX = tS * roadInlayW;
                     const wPtAsph = bridgeLocalToWorld(rb, asphX, localZ);
-                    const gAsphY = getTerrainHeight(wPtAsph.x, wPtAsph.z) + 0.064;
-                    const asphTopY = THREE.MathUtils.lerp(0.352, gAsphY + 0.002, smoothRamp);
+                    const rawAsphG = getTerrainHeight(wPtAsph.x, wPtAsph.z);
+                    const gAsphY = (Number.isFinite(rawAsphG) ? rawAsphG : 0.25) + 0.064;
+                    const asphTopY = iu === 0
+                        ? 0.352
+                        : (iu === rStepsU
+                            ? Math.max(WATER_LEVEL + 0.162, gAsphY + 0.002)
+                            : Math.max(THREE.MathUtils.lerp(0.352, safeToeCenterY + 0.002, smoothRamp), gAsphY + 0.047));
                     asphPosArr.push(asphX, asphTopY, localZ);
                 }
             }
@@ -6635,6 +6887,22 @@ function createValleyRiver() {
             });
         }
 
+        bridgeGroup.name = `RiverBridge_${rb.id || 0}_${archetype}`;
+        bridgeGroup.userData.bridgeId = rb.id;
+        bridgeGroup.userData._bridgeId = rb.id;
+        bridgeGroup.userData._creationSource = 'terrain-fow.js:buildRiverBridgeMeshes';
+        bridgeGroup.userData._subsystem = 'bridge-generator';
+        if (typeof window.tagSceneObjectMetadata === 'function') {
+            window.tagSceneObjectMetadata(bridgeGroup, 'terrain-fow.js:buildRiverBridgeMeshes', 'bridge-generator', { bridgeId: rb.id });
+        } else {
+            bridgeGroup.traverse(child => {
+                if (child && child.userData) {
+                    child.userData._creationSource = 'terrain-fow.js:buildRiverBridgeMeshes';
+                    child.userData._subsystem = 'bridge-generator';
+                    child.userData._bridgeId = rb.id;
+                }
+            });
+        }
         addMapMesh(bridgeGroup);
     });
 }
@@ -13751,7 +14019,21 @@ function validateRiverGeometry() {
 
 function validateBridgeConnections() {
     const issues = [];
-    if (!HAS_VALLEY_RIVER) return { valid: true, issues };
+    const bridgeReports = [];
+    const deckElevY = 0.35;
+
+    if (!HAS_VALLEY_RIVER) {
+        window.BRIDGE_DIAGNOSTICS = {
+            seed: MAP_SEED,
+            biome: ACTIVE_PLANET_BIOME,
+            hasValleyRiver: false,
+            bridgeCount: 0,
+            valid: true,
+            issues: [],
+            bridges: []
+        };
+        return { valid: true, issues, bridges: [] };
+    }
 
     for (let i = 0; i < RIVER_BRIDGES.length; i++) {
         const rb = RIVER_BRIDGES[i];
@@ -13761,29 +14043,100 @@ function validateBridgeConnections() {
             const expectedYaw = RIVER_ANGLE - Math.atan(localSlope);
             const yawErr = Math.abs(THREE.MathUtils.euclideanModulo((rb.yaw ?? expectedYaw) - expectedYaw + Math.PI, Math.PI * 2) - Math.PI);
             if (yawErr > 0.15) {
-                issues.push({ type: 'bridge_orientation_mismatch', bridgeIndex: i, yawErr, expectedYaw });
+                issues.push({ type: 'bridge_orientation_mismatch', bridgeIndex: i, bridgeId: rb.id, yawErr, expectedYaw });
             }
         }
-        const rampReachU = rb.rampReachU || (getRiverHalfWidthAtS(s0) + 3.45);
+
+        const flatHalfSpan = rb.flatHalfSpan || (getRiverHalfWidthAtS(s0) + 0.65);
+        const rampReachU = rb.rampReachU || (flatHalfSpan + 3.1);
+        const halfWidth = rb.halfWidth || 3.45;
+
+        const northToePt = bridgeLocalToWorld(rb, 0, -rampReachU);
+        const southToePt = bridgeLocalToWorld(rb, 0, rampReachU);
+        const northShorePt = rb.shorelineA || bridgeLocalToWorld(rb, 0, -flatHalfSpan);
+        const southShorePt = rb.shorelineB || bridgeLocalToWorld(rb, 0, flatHalfSpan);
+
+        const northToeY = getTerrainHeight(northToePt.x, northToePt.z);
+        const southToeY = getTerrainHeight(southToePt.x, southToePt.z);
+        const northShoreY = getTerrainHeight(northShorePt.x, northShorePt.z);
+        const southShoreY = getTerrainHeight(southShorePt.x, southShorePt.z);
+
+        // Sample terrain under the water-spanning bridge deck to confirm zero terrain overlap & continuous water clearance
+        let maxTerrainUnderDeck = -Infinity;
+        let minTerrainUnderDeck = Infinity;
+        let maxCenterChannelTerrain = -Infinity;
+        let intermediateIslandOverlap = false;
+        const sampleCount = 21;
+        for (let sIdx = 0; sIdx <= sampleCount; sIdx++) {
+            const frac = (sIdx / sampleCount) * 2.0 - 1.0; // -1..+1
+            const localZ = frac * (flatHalfSpan * 0.88);
+            for (let latIdx = -1; latIdx <= 1; latIdx++) {
+                const localX = latIdx * (halfWidth * 0.72);
+                const wPt = bridgeLocalToWorld(rb, localX, localZ);
+                const th = getTerrainHeight(wPt.x, wPt.z);
+                if (th > maxTerrainUnderDeck) maxTerrainUnderDeck = th;
+                if (th < minTerrainUnderDeck) minTerrainUnderDeck = th;
+                if (Math.abs(frac) <= 0.55 && latIdx === 0 && th > maxCenterChannelTerrain) {
+                    maxCenterChannelTerrain = th;
+                }
+            }
+            if (rb.isCustomIslandBridge && Math.abs(frac) <= 0.72 && Array.isArray(OCEAN_ISLANDS)) {
+                const centerPt = bridgeLocalToWorld(rb, 0, localZ);
+                for (let k = 0; k < OCEAN_ISLANDS.length; k++) {
+                    const isl = OCEAN_ISLANDS[k];
+                    if (!isl || isl.id === rb.islandAId || isl.id === rb.islandBId) continue;
+                    const ang = Math.atan2(centerPt.z - isl.z, centerPt.x - isl.x);
+                    const coastR = typeof getOceanIslandCoastRadiusAtAngle === 'function'
+                        ? getOceanIslandCoastRadiusAtAngle(isl, ang)
+                        : Math.min(isl.rx, isl.rz);
+                    if (Math.hypot(centerPt.x - isl.x, centerPt.z - isl.z) < coastR - 0.5) {
+                        intermediateIslandOverlap = true;
+                    }
+                }
+            }
+        }
+
+        const terrainClearOfDeck = maxTerrainUnderDeck < deckElevY - 0.04;
+        const hasWaterUnderCenter = maxCenterChannelTerrain <= RIVER_WATER_Y + 0.05;
+
+        if (!terrainClearOfDeck) {
+            issues.push({
+                type: 'bridge_deck_terrain_overlap',
+                bridgeIndex: i,
+                bridgeId: rb.id,
+                maxTerrainUnderDeck: Number(maxTerrainUnderDeck.toFixed(3)),
+                deckElevY
+            });
+        }
+        if (intermediateIslandOverlap) {
+            issues.push({
+                type: 'bridge_crosses_intermediate_island',
+                bridgeIndex: i,
+                bridgeId: rb.id
+            });
+        }
+
         [-1, 1].forEach(endSign => {
-            const toePt = bridgeLocalToWorld(rb, 0, endSign * rampReachU);
-            const toeGroundH = getTerrainHeight(toePt.x, toePt.z);
-            if (toeGroundH < RIVER_WATER_Y + 0.05) {
+            const toePt = endSign < 0 ? northToePt : southToePt;
+            const toeGroundH = endSign < 0 ? northToeY : southToeY;
+            if (!Number.isFinite(toeGroundH) || toeGroundH < RIVER_WATER_Y + 0.05) {
                 issues.push({
                     type: 'bridge_ramp_submerged',
                     bridgeIndex: i,
+                    bridgeId: rb.id,
                     endSign,
                     x: toePt.x,
                     z: toePt.z,
                     toeGroundH
                 });
             }
-            if (!rb.isCustomIslandBridge && ACTIVE_PLANET_BIOME !== 'ocean') {
+            if (!rb.isCustomIslandBridge && ACTIVE_PLANET_BIOME !== 'ocean' && ACTIVE_PLANET_BIOME !== 'lava' && DYNAMIC_ROAD_SEGMENTS.length > 0) {
                 const roadFactorAtToe = getSupplyRoadFactor(toePt.x, toePt.z);
                 if (roadFactorAtToe < 0.20) {
                     issues.push({
                         type: 'bridge_disconnected_from_road',
                         bridgeIndex: i,
+                        bridgeId: rb.id,
                         endSign,
                         x: toePt.x,
                         z: toePt.z,
@@ -13792,8 +14145,78 @@ function validateBridgeConnections() {
                 }
             }
         });
+
+        const bCenterX = Number.isFinite(rb.centerX) ? rb.centerX : (Number.isFinite(rb.worldX) ? rb.worldX : 0);
+        const bCenterZ = Number.isFinite(rb.centerZ) ? rb.centerZ : (Number.isFinite(rb.worldZ) ? rb.worldZ : 0);
+        const northWalkable = typeof isWalkableGround === 'function' ? isWalkableGround(northToePt.x, northToePt.z, 0.4) : true;
+        const centerWalkable = typeof isWalkableGround === 'function' ? isWalkableGround(bCenterX, bCenterZ, 0.4) : true;
+        const southWalkable = typeof isWalkableGround === 'function' ? isWalkableGround(southToePt.x, southToePt.z, 0.4) : true;
+        const navConnected = Boolean(northWalkable && centerWalkable && southWalkable);
+
+        const distinctLandAreas = rb.isCustomIslandBridge
+            ? Boolean(rb.islandAId && rb.islandBId && rb.islandAId !== rb.islandBId && northToeY > RIVER_WATER_Y + 0.05 && southToeY > RIVER_WATER_Y + 0.05)
+            : Boolean(northToeY > RIVER_WATER_Y + 0.05 && southToeY > RIVER_WATER_Y + 0.05);
+
+        bridgeReports.push({
+            id: rb.id,
+            bridgeIndex: i,
+            archetype: rb.archetype || 'girder_bridge',
+            isCustomIslandBridge: Boolean(rb.isCustomIslandBridge),
+            islandAId: rb.islandAId || 'north_bank',
+            islandBId: rb.islandBId || 'south_bank',
+            center: { x: Number(bCenterX.toFixed(2)), z: Number(bCenterZ.toFixed(2)), yaw: Number((rb.yaw || 0).toFixed(3)) },
+            endpoints: {
+                northEntry: { x: Number(northToePt.x.toFixed(2)), y: Number(northToeY.toFixed(2)), z: Number(northToePt.z.toFixed(2)) },
+                southEntry: { x: Number(southToePt.x.toFixed(2)), y: Number(southToeY.toFixed(2)), z: Number(southToePt.z.toFixed(2)) }
+            },
+            shorelineIntersections: {
+                northShore: { x: Number(northShorePt.x.toFixed(2)), y: Number(northShoreY.toFixed(2)), z: Number(northShorePt.z.toFixed(2)) },
+                southShore: { x: Number(southShorePt.x.toFixed(2)), y: Number(southShoreY.toFixed(2)), z: Number(southShorePt.z.toFixed(2)) }
+            },
+            deckLength: Number((flatHalfSpan * 2).toFixed(2)),
+            totalLengthWithRamps: Number((rampReachU * 2).toFixed(2)),
+            deckWidth: Number((halfWidth * 2).toFixed(2)),
+            rampElevations: {
+                northToeY: Number(northToeY.toFixed(3)),
+                southToeY: Number(southToeY.toFixed(3)),
+                deckY: deckElevY
+            },
+            terrainIntersectionCheck: {
+                passed: terrainClearOfDeck,
+                maxTerrainUnderDeck: Number(maxTerrainUnderDeck.toFixed(3)),
+                minTerrainUnderDeck: Number(minTerrainUnderDeck.toFixed(3)),
+                deckY: deckElevY
+            },
+            waterClearance: {
+                passed: hasWaterUnderCenter,
+                waterLevel: RIVER_WATER_Y,
+                maxBedUnderCenter: Number(maxCenterChannelTerrain.toFixed(3)),
+                minClearanceAboveWater: Number((deckElevY - RIVER_WATER_Y).toFixed(3))
+            },
+            islandOverlapCheck: {
+                passed: !intermediateIslandOverlap
+            },
+            connectsDistinctLandAreas: distinctLandAreas,
+            navigationConnectivity: {
+                passed: navConnected,
+                northWalkable,
+                centerWalkable,
+                southWalkable
+            }
+        });
     }
-    return { valid: issues.length === 0, issues };
+
+    window.BRIDGE_DIAGNOSTICS = {
+        seed: MAP_SEED,
+        biome: ACTIVE_PLANET_BIOME,
+        hasValleyRiver: HAS_VALLEY_RIVER,
+        bridgeCount: bridgeReports.length,
+        valid: issues.length === 0,
+        issues,
+        bridges: bridgeReports
+    };
+
+    return { valid: issues.length === 0, issues, bridges: bridgeReports };
 }
 
 function validateTerrainSlopes() {

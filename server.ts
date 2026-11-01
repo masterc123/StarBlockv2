@@ -315,14 +315,14 @@ wss.on('connection', (ws) => {
 
           const lobbyId = `lob_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
           const mapBiome = (['highland', 'desert', 'ocean', 'lava', 'jungle', 'random'].includes(msg.mapBiome) ? msg.mapBiome : 'highland') as MultiplayerLobby['mapBiome'];
-          const mode: LobbyGameMode = msg.mode || '1v1';
+          const mode: LobbyGameMode = msg.mode || 'custom';
           const hostFaction = msg.faction || 'Terran Dominion';
           const hostPlayer: LobbyPlayer = {
             id: meta.playerId,
             name: meta.name,
             isHost: true,
             isAi: false,
-            team: mode === 'ffa' ? 0 : 1,
+            team: 1,
             faction: hostFaction,
             ping: 15,
             ready: true,
@@ -330,22 +330,9 @@ wss.on('connection', (ws) => {
             antiCheatFlags: 0
           };
 
-          let initialPlayers: LobbyPlayer[] = [hostPlayer];
-          if (Array.isArray(msg.initialPlayers) && msg.initialPlayers.length > 0) {
-            initialPlayers = msg.initialPlayers.map((p: any, idx: number) => ({
-              id: p.isAi ? (p.id || `bot_${Date.now()}_${idx}`) : meta.playerId,
-              name: p.isAi ? String(p.name || `[BOT] Commander_${idx + 1}`) : meta.name,
-              isHost: !p.isAi && idx === 0,
-              isAi: Boolean(p.isAi),
-              aiDifficulty: p.isAi ? (p.aiDifficulty || 'Hard') : undefined,
-              team: (typeof p.team === 'number' ? p.team : (mode === 'ffa' ? 0 : (p.isAi ? 2 : 1))) as LobbyPlayer['team'],
-              faction: p.faction || (p.isAi ? 'Zerg Swarm' : hostFaction),
-              ping: p.isAi ? 0 : 15,
-              ready: true,
-              antiCheatVerified: true,
-              antiCheatFlags: 0
-            }));
-          }
+          // Host always creates a lobby starting with one human slot (the host);
+          // Host manually adds AI opponents or waits for human joiners.
+          const initialPlayers: LobbyPlayer[] = [hostPlayer];
 
           const newLobby: MultiplayerLobby = {
             id: lobbyId,
@@ -406,9 +393,12 @@ wss.on('connection', (ws) => {
           if (msg.name) meta.name = String(msg.name).slice(0, 24);
 
           const existingPlayer = lobby.players.find(p => p.id === meta.playerId);
-          const hasHumanHost = lobby.players.some(p => !p.isAi && p.isHost);
+          const hasHumanHost = lobby.players.some(p => !p.isAi && p.id === lobby.hostId);
           if (!existingPlayer) {
-            const teamChoice: 1 | 2 | 3 | 4 | 0 = lobby.mode === 'ffa' ? 0 : 1;
+            // Assign joining player to Team 2 if Team 1 already has a player and Team 2 is empty, otherwise Team 1
+            const team1Count = lobby.players.filter(p => p.team === 1).length;
+            const team2Count = lobby.players.filter(p => p.team === 2).length;
+            const teamChoice: 1 | 2 | 3 | 4 | 0 = team1Count > team2Count ? 2 : 1;
             const makeHost = !hasHumanHost;
             if (makeHost) {
               lobby.hostId = meta.playerId;
@@ -445,6 +435,13 @@ wss.on('connection', (ws) => {
           if (!meta.lobbyId) return;
           const lobby = lobbies.get(meta.lobbyId);
           if (!lobby) return;
+          if (lobby.hostId !== meta.playerId) {
+            ws.send(JSON.stringify({
+              type: 's:error',
+              message: 'Host permission required: Only the lobby host can update lobby configuration.'
+            }));
+            return;
+          }
           if (typeof msg.name === 'string' && msg.name.trim()) {
             lobby.name = msg.name.trim().slice(0, 48);
           }
@@ -459,19 +456,41 @@ wss.on('connection', (ws) => {
             lobby.seed = Math.floor(Number(msg.seed));
           }
           if (Array.isArray(msg.players)) {
-            lobby.players = msg.players.slice(0, lobby.maxPlayers).map((p: any, idx: number) => ({
-              id: String(p.id || (p.isAi ? `bot_${Date.now()}_${idx}` : meta.playerId)),
-              name: String(p.name || (p.isAi ? `[BOT] AI_${idx + 1}` : meta.name)),
-              isHost: Boolean(p.isHost),
-              isAi: Boolean(p.isAi),
-              aiDifficulty: p.isAi ? (p.aiDifficulty || 'Hard') : undefined,
-              team: (typeof p.team === 'number' ? p.team : 1) as LobbyPlayer['team'],
-              faction: p.faction || 'Terran Dominion',
-              ping: p.isAi ? 0 : (Number(p.ping) || 15),
-              ready: p.isAi ? true : Boolean(p.ready),
-              antiCheatVerified: true,
-              antiCheatFlags: 0
-            }));
+            const seenIds = new Set<string>();
+            const nextPlayers: LobbyPlayer[] = [];
+            for (let idx = 0; idx < Math.min(msg.players.length, lobby.maxPlayers); idx++) {
+              const p = msg.players[idx];
+              if (!p) continue;
+              const isAiSlot = Boolean(p.isAi || p.isBot || p.type === 'ai');
+              const pid = String(p.id || p.playerId || (isAiSlot ? `bot_${Date.now()}_${idx}` : meta.playerId));
+              if (seenIds.has(pid)) {
+                ws.send(JSON.stringify({
+                  type: 's:error',
+                  message: `Invalid participant configuration: Duplicate participant ID "${pid}".`
+                }));
+                return;
+              }
+              seenIds.add(pid);
+              const existing = lobby.players.find(ep => ep.id === pid);
+              const rawTeam = Number(p.team ?? p.teamId ?? (existing ? existing.team : (isAiSlot ? 2 : 1)));
+              const validTeam = ([0, 1, 2, 3, 4].includes(rawTeam) ? rawTeam : (isAiSlot ? 2 : 1)) as LobbyPlayer['team'];
+              nextPlayers.push({
+                id: pid,
+                name: String(p.name || (existing ? existing.name : (isAiSlot ? `[BOT] AI_${idx + 1}` : meta.name))).slice(0, 28),
+                isHost: !isAiSlot && pid === lobby.hostId,
+                isAi: isAiSlot,
+                aiDifficulty: isAiSlot ? (['Easy', 'Medium', 'Hard', 'Insane'].includes(p.aiDifficulty || p.difficulty) ? (p.aiDifficulty || p.difficulty) : 'Hard') : undefined,
+                team: validTeam,
+                faction: p.faction || (existing ? existing.faction : 'Terran Dominion'),
+                ping: isAiSlot ? 0 : (existing ? existing.ping : (Number(p.ping) || 15)),
+                ready: isAiSlot ? true : (p.ready !== undefined ? Boolean(p.ready) : (existing ? existing.ready : true)),
+                antiCheatVerified: true,
+                antiCheatFlags: 0
+              });
+            }
+            if (nextPlayers.length > 0) {
+              lobby.players = nextPlayers;
+            }
           }
           broadcastRoom(meta.lobbyId);
           break;
@@ -481,24 +500,67 @@ wss.on('connection', (ws) => {
           if (!meta.lobbyId) return;
           const lobby = lobbies.get(meta.lobbyId);
           if (!lobby) return;
-          const targetId = msg.playerId || meta.playerId;
+          const isHostSender = lobby.hostId === meta.playerId;
+
+          // Joiners can never modify another player's slot or host-only settings
+          if (!isHostSender) {
+            if (msg.playerId !== undefined && msg.playerId !== meta.playerId) {
+              ws.send(JSON.stringify({
+                type: 's:error',
+                message: 'Host permission required: Joiners cannot modify other participants.'
+              }));
+              return;
+            }
+            if (
+              msg.team !== undefined ||
+              msg.mapBiome !== undefined ||
+              msg.mode !== undefined ||
+              msg.seed !== undefined ||
+              msg.aiDifficulty !== undefined ||
+              msg.roomName !== undefined
+            ) {
+              ws.send(JSON.stringify({
+                type: 's:error',
+                message: 'Host permission required: Joiners can only update their own ready status and faction.'
+              }));
+              return;
+            }
+          }
+
+          const targetId = isHostSender ? (msg.playerId || meta.playerId) : meta.playerId;
           const player = lobby.players.find(p => p.id === targetId);
-          if (player) {
-            if (msg.team !== undefined) player.team = msg.team;
-            if (msg.ready !== undefined) player.ready = msg.ready;
-            if (msg.faction !== undefined) player.faction = msg.faction;
+          if (!player) {
+            ws.send(JSON.stringify({ type: 's:error', message: 'Participant not found in lobby.' }));
+            return;
+          }
+
+          if (msg.ready !== undefined) {
+            player.ready = Boolean(msg.ready);
+          }
+          if (msg.faction !== undefined && typeof msg.faction === 'string') {
+            if (!player.isAi || isHostSender) {
+              player.faction = msg.faction;
+            }
+          }
+          if (isHostSender) {
+            if (msg.team !== undefined && [0, 1, 2, 3, 4].includes(Number(msg.team))) {
+              player.team = Number(msg.team) as LobbyPlayer['team'];
+            }
+            if (msg.aiDifficulty !== undefined && player.isAi && ['Easy', 'Medium', 'Hard', 'Insane'].includes(msg.aiDifficulty)) {
+              player.aiDifficulty = msg.aiDifficulty;
+            }
             if (msg.name !== undefined && !player.isAi) {
               player.name = String(msg.name).slice(0, 24);
               if (player.id === meta.playerId) meta.name = player.name;
-              if (player.isHost) lobby.hostName = player.name;
+              if (player.id === lobby.hostId) lobby.hostName = player.name;
             }
-          }
-          if (msg.mode !== undefined) {
-            lobby.mode = msg.mode;
-          }
-          if (msg.mapBiome !== undefined && ['highland', 'desert', 'ocean', 'lava', 'jungle', 'random'].includes(msg.mapBiome)) {
-            lobby.mapBiome = msg.mapBiome;
-            lobby.mapName = BIOME_MAP_NAMES[msg.mapBiome] || lobby.mapName;
+            if (msg.mode !== undefined) {
+              lobby.mode = msg.mode;
+            }
+            if (msg.mapBiome !== undefined && ['highland', 'desert', 'ocean', 'lava', 'jungle', 'random'].includes(msg.mapBiome)) {
+              lobby.mapBiome = msg.mapBiome;
+              lobby.mapName = BIOME_MAP_NAMES[msg.mapBiome] || lobby.mapName;
+            }
           }
           broadcastRoom(meta.lobbyId);
           break;
@@ -507,21 +569,44 @@ wss.on('connection', (ws) => {
         case 'c:add_bot': {
           if (!meta.lobbyId) return;
           const lobby = lobbies.get(meta.lobbyId);
-          if (!lobby || lobby.players.length >= lobby.maxPlayers) return;
-          const diff = msg.difficulty || 'Hard';
-          const botTeam: 1 | 2 | 3 | 4 | 0 = lobby.mode === 'ffa' ? 0 : (msg.team ?? 2);
+          if (!lobby) return;
+          if (lobby.hostId !== meta.playerId) {
+            ws.send(JSON.stringify({
+              type: 's:error',
+              message: 'Host permission required: Only the lobby host can add AI participants.'
+            }));
+            return;
+          }
+          if (lobby.players.length >= lobby.maxPlayers) {
+            ws.send(JSON.stringify({
+              type: 's:error',
+              message: `Lobby is full (max ${lobby.maxPlayers} participants).`
+            }));
+            return;
+          }
+          const diff = ['Easy', 'Medium', 'Hard', 'Insane'].includes(msg.difficulty) ? msg.difficulty : 'Hard';
+          const rawTeam = Number(msg.team ?? 2);
+          const botTeam: 1 | 2 | 3 | 4 | 0 = ([0, 1, 2, 3, 4].includes(rawTeam) ? rawTeam : 2) as LobbyPlayer['team'];
           const botNames = botTeam === 1
             ? ['Commander_Nova', 'Executor_Tassadar', 'Raynor_Raider', 'Artanis_Synod']
             : ['Zagara_Brood', 'Abathur_Swarm', 'Kerrigan_Hive', 'Dehaka_Pack'];
           const botLabel = msg.name || `[BOT] ${botNames[lobby.players.length % botNames.length]}`;
+          const candidateId = msg.botId ? String(msg.botId) : `bot_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+          if (lobby.players.some(p => p.id === candidateId)) {
+            ws.send(JSON.stringify({
+              type: 's:error',
+              message: `Duplicate participant ID "${candidateId}".`
+            }));
+            return;
+          }
           lobby.players.push({
-            id: msg.botId || `bot_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+            id: candidateId,
             name: botLabel,
             isHost: false,
             isAi: true,
             aiDifficulty: diff,
             team: botTeam,
-            faction: msg.faction || (botTeam === 1 ? 'Protoss Fleet' : (botTeam === 0 ? 'Protoss Fleet' : 'Zerg Swarm')),
+            faction: msg.faction || (botTeam === 1 ? 'Protoss Fleet' : 'Zerg Swarm'),
             ping: 0,
             ready: true,
             antiCheatVerified: true,
@@ -535,12 +620,32 @@ wss.on('connection', (ws) => {
           if (!meta.lobbyId) return;
           const lobby = lobbies.get(meta.lobbyId);
           if (!lobby) return;
+          if (lobby.hostId !== meta.playerId) {
+            ws.send(JSON.stringify({
+              type: 's:error',
+              message: 'Host permission required: Only the lobby host can configure AI participants.'
+            }));
+            return;
+          }
           const bot = lobby.players.find(p => p.id === msg.botId && p.isAi);
-          if (bot) {
-            if (msg.team !== undefined) bot.team = msg.team;
-            if (msg.faction !== undefined) bot.faction = msg.faction;
-            if (msg.aiDifficulty !== undefined) bot.aiDifficulty = msg.aiDifficulty;
-            if (msg.name !== undefined) bot.name = String(msg.name).slice(0, 28);
+          if (!bot) {
+            ws.send(JSON.stringify({
+              type: 's:error',
+              message: 'AI participant not found.'
+            }));
+            return;
+          }
+          if (msg.team !== undefined && [0, 1, 2, 3, 4].includes(Number(msg.team))) {
+            bot.team = Number(msg.team) as LobbyPlayer['team'];
+          }
+          if (msg.faction !== undefined && typeof msg.faction === 'string') {
+            bot.faction = msg.faction;
+          }
+          if (msg.aiDifficulty !== undefined && ['Easy', 'Medium', 'Hard', 'Insane'].includes(msg.aiDifficulty)) {
+            bot.aiDifficulty = msg.aiDifficulty;
+          }
+          if (msg.name !== undefined) {
+            bot.name = String(msg.name).slice(0, 28);
           }
           broadcastRoom(meta.lobbyId);
           break;
@@ -550,6 +655,13 @@ wss.on('connection', (ws) => {
           if (!meta.lobbyId) return;
           const lobby = lobbies.get(meta.lobbyId);
           if (!lobby) return;
+          if (lobby.hostId !== meta.playerId) {
+            ws.send(JSON.stringify({
+              type: 's:error',
+              message: 'Host permission required: Only the lobby host can change the map seed.'
+            }));
+            return;
+          }
           const candidateSeed = Number(msg.seed);
           lobby.seed = (Number.isFinite(candidateSeed) && candidateSeed > 0)
             ? Math.floor(candidateSeed)
@@ -562,6 +674,20 @@ wss.on('connection', (ws) => {
           if (!meta.lobbyId) return;
           const lobby = lobbies.get(meta.lobbyId);
           if (!lobby) return;
+          if (lobby.hostId !== meta.playerId) {
+            ws.send(JSON.stringify({
+              type: 's:error',
+              message: 'Host permission required: Only the lobby host can remove participants.'
+            }));
+            return;
+          }
+          if (msg.playerId === lobby.hostId) {
+            ws.send(JSON.stringify({
+              type: 's:error',
+              message: 'Host cannot remove their own host slot.'
+            }));
+            return;
+          }
           lobby.players = lobby.players.filter(p => p.id !== msg.playerId);
           broadcastRoom(meta.lobbyId);
           break;
@@ -728,6 +854,61 @@ wss.on('connection', (ws) => {
           if (!meta.lobbyId) return;
           const lobby = lobbies.get(meta.lobbyId);
           if (!lobby) return;
+          if (lobby.hostId !== meta.playerId) {
+            ws.send(JSON.stringify({
+              type: 's:error',
+              message: 'Host permission required: Only the lobby host can start the match.'
+            }));
+            return;
+          }
+          // Validate final participant roster on the server before starting the match
+          const rosterErrors: string[] = [];
+          if (!Array.isArray(lobby.players) || lobby.players.length < 2) {
+            rosterErrors.push('At least 2 participants are required to start a match.');
+          } else {
+            const seenIds = new Set<string>();
+            const activeTeams = new Set<number>();
+            let humanCount = 0;
+            lobby.players.forEach((p, idx) => {
+              if (!p || !p.id) {
+                rosterErrors.push(`Slot ${idx + 1} is missing a valid participant ID.`);
+                return;
+              }
+              if (seenIds.has(p.id)) {
+                rosterErrors.push(`Duplicate participant ID "${p.id}".`);
+              }
+              seenIds.add(p.id);
+              const fLower = String(p.faction || '').toLowerCase();
+              if (!fLower.includes('terran') && !fLower.includes('protoss') && !fLower.includes('solaris') && !fLower.includes('zerg')) {
+                rosterErrors.push(`Participant "${p.name}" has an invalid faction "${p.faction}".`);
+              }
+              if (typeof p.team !== 'number' || ![0, 1, 2, 3, 4].includes(p.team)) {
+                rosterErrors.push(`Participant "${p.name}" has an invalid team assignment "${p.team}".`);
+              } else {
+                activeTeams.add(p.team === 0 ? (100 + idx) : p.team);
+              }
+              if (!p.isAi) {
+                humanCount++;
+                if (p.ready === false) {
+                  rosterErrors.push(`Human player "${p.name}" is not ready.`);
+                }
+              }
+            });
+            if (humanCount < 1) {
+              rosterErrors.push('At least 1 human player is required.');
+            }
+            if (activeTeams.size < 2) {
+              rosterErrors.push('At least 2 opposing teams are required (assign participants to Team 1 and Team 2).');
+            }
+          }
+          if (rosterErrors.length > 0) {
+            ws.send(JSON.stringify({
+              type: 's:error',
+              message: `Cannot start match: ${rosterErrors.join(' ')}`
+            }));
+            return;
+          }
+
           lobby.status = 'In Progress';
           (lobby as any).seq = 0;
           broadcastRoomMessage(meta.lobbyId, {

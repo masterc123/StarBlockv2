@@ -8,7 +8,7 @@ export interface LobbyPlayer {
   name: string;
   isHost: boolean;
   isAi: boolean;
-  aiDifficulty?: 'Easy' | 'Medium' | 'Hard' | 'Brutal';
+  aiDifficulty?: 'Easy' | 'Medium' | 'Hard' | 'Insane' | 'Brutal';
   team: 1 | 2 | 3 | 4 | 0; // 0 = FFA
   faction: 'Terran Dominion' | 'Zerg Swarm' | 'Protoss Fleet' | 'Protoss Solaris';
   ping: number;
@@ -49,6 +49,7 @@ class RealtimeMultiplayerClient {
   private ws: WebSocket | null = null;
   private listeners: Set<Listener> = new Set();
   public isConnected = false;
+  public connectionState: 'offline' | 'connecting' | 'connected' = 'offline';
   public myPlayerId: string;
   public myPlayerName: string;
   public clientKey: string;
@@ -84,11 +85,14 @@ class RealtimeMultiplayerClient {
     const wsUrl = `${protocol}//${window.location.host}/ws`;
 
     try {
+      this.connectionState = 'connecting';
+      this.emit('connection_status', { connected: false, state: 'connecting', transport: 'websocket', wsType: 'multiplayer', url: wsUrl });
       this.ws = new WebSocket(wsUrl);
 
       this.ws.onopen = () => {
         this.isConnected = true;
-        this.emit('connection_status', { connected: true, transport: 'websocket' });
+        this.connectionState = 'connected';
+        this.emit('connection_status', { connected: true, state: 'connected', transport: 'websocket', wsType: 'multiplayer', url: wsUrl });
         this.send({ type: 'c:hello', clientKey: this.clientKey, name: this.myPlayerName });
         this.send({ type: 'c:get_lobbies', clientKey: this.clientKey });
       };
@@ -104,16 +108,21 @@ class RealtimeMultiplayerClient {
 
       this.ws.onclose = () => {
         this.isConnected = false;
-        this.emit('connection_status', { connected: false, transport: 'offline' });
+        this.connectionState = 'offline';
+        this.emit('connection_status', { connected: false, state: 'offline', transport: 'offline', wsType: 'multiplayer', url: wsUrl });
       };
 
-      this.ws.onerror = () => {
+      this.ws.onerror = (err) => {
         this.isConnected = false;
-        this.emit('connection_status', { connected: false, transport: 'offline' });
+        this.connectionState = 'offline';
+        console.warn('[MultiplayerWebSocket] Application /ws connection error:', err);
+        this.emit('connection_status', { connected: false, state: 'offline', transport: 'offline', wsType: 'multiplayer', url: wsUrl });
       };
-    } catch {
+    } catch (err) {
       this.isConnected = false;
-      this.emit('connection_status', { connected: false, transport: 'offline' });
+      this.connectionState = 'offline';
+      console.warn('[MultiplayerWebSocket] Failed to initialize /ws connection:', err);
+      this.emit('connection_status', { connected: false, state: 'offline', transport: 'offline', wsType: 'multiplayer', url: wsUrl });
     }
   }
 
@@ -170,13 +179,12 @@ class RealtimeMultiplayerClient {
     this.listeners.forEach((fn) => fn({ type, payload }));
   }
 
-  public createLobby(name: string, mode: LobbyGameMode, mapBiome = 'highland', initialPlayers?: Partial<LobbyPlayer>[]) {
+  public createLobby(name: string, mapBiome = 'highland', maxPlayers = 6) {
     return this.send({
       type: 'c:create_lobby',
       name,
-      mode,
       mapBiome,
-      initialPlayers
+      maxPlayers
     });
   }
 
@@ -206,19 +214,34 @@ class RealtimeMultiplayerClient {
     });
   }
 
-  public updatePlayer(updates: Partial<LobbyPlayer> & { mode?: string; mapBiome?: string }) {
+  public updatePlayer(updates: Partial<LobbyPlayer> & { playerId?: string; mode?: string; mapBiome?: string }) {
     return this.send({
       type: 'c:update_player',
       ...updates
     });
   }
 
-  public addBot(difficulty: 'Easy' | 'Medium' | 'Hard' | 'Brutal', team: 1 | 2 | 3 | 4 | 0 = 2, faction?: string) {
+  public addBot(difficulty: 'Easy' | 'Medium' | 'Hard' | 'Insane' | 'Brutal', team: 1 | 2 | 3 | 4 | 0 = 2, faction?: string) {
     return this.send({
       type: 'c:add_bot',
       difficulty,
       team,
       faction
+    });
+  }
+
+  public updateBot(botId: string, updates: { team?: 1 | 2 | 3 | 4 | 0; faction?: string; aiDifficulty?: string; name?: string }) {
+    return this.send({
+      type: 'c:update_bot',
+      botId,
+      ...updates
+    });
+  }
+
+  public regenMap(seed?: number) {
+    return this.send({
+      type: 'c:regen_map',
+      seed
     });
   }
 
