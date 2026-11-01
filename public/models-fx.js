@@ -5105,29 +5105,42 @@ function createOrdnancePod(wType) {
     }
     else if (wType === 'rocket') {
         // 6-TUBE ARMORED SAM / ATGM ROCKET MISSILE POD (Targets Ground & Air up to 20m!)
-        const launcherBox = new THREE.Mesh(createExtrudedArmorHullGeo(0.42, 0.34, 0.62, 0.03, 0.08), MAT.terranPlating);
-        launcherBox.position.set(0, 0.04, 0.14);
-        const hazardTrim = new THREE.Mesh(createExtrudedArmorHullGeo(0.44, 0.06, 0.56), MAT.hazard);
-        hazardTrim.position.set(0, 0.22, 0.14);
+        const launcherBox = new THREE.Mesh(createExtrudedArmorHullGeo(0.46, 0.36, 0.66, 0.03, 0.08), MAT.terranPlating);
+        launcherBox.position.set(0, 0.05, 0.14);
+        const hazardTrim = new THREE.Mesh(createExtrudedArmorHullGeo(0.48, 0.06, 0.58), MAT.hazard);
+        hazardTrim.position.set(0, 0.24, 0.14);
         recoilGroup.add(launcherBox, hazardTrim);
 
-        // 6 Launch Tubes with Red Missile Nose Cones peeking out
-        [-0.11, 0, 0.11].forEach(rx => {
-            [-0.02, 0.10].forEach(ry => {
-                const tube = new THREE.Mesh(createSculptedLatheBarrelGeo(0.042, 0.042, 0.66, 10), MAT.darkSteel);
+        // 6 Individual Launch Tubes with Dedicated World-Space Muzzle Nodes & Rear Backblast Vent
+        const rocketTubeMuzzles = [];
+        const rocketWarheadTips = [];
+        [-0.12, 0, 0.12].forEach(rx => {
+            [-0.02, 0.11].forEach(ry => {
+                const tube = new THREE.Mesh(createSculptedLatheBarrelGeo(0.044, 0.044, 0.68, 10), MAT.darkSteel);
                 tube.rotation.x = Math.PI / 2;
                 tube.position.set(rx, ry, 0.16);
                 const warhead = new THREE.Mesh(createSculptedOgiveSpireGeo(0.038, 0.14, 10), MAT.crimsonTank);
                 warhead.rotation.x = Math.PI / 2;
                 warhead.position.set(rx, ry, 0.52);
-                recoilGroup.add(tube, warhead);
+                const tubeMuzzle = new THREE.Object3D();
+                tubeMuzzle.position.set(rx, ry, 0.58);
+                recoilGroup.add(tube, warhead, tubeMuzzle);
+                rocketTubeMuzzles.push(tubeMuzzle);
+                rocketWarheadTips.push(warhead);
             });
         });
 
+        const backblastNode = new THREE.Object3D();
+        backblastNode.position.set(0, 0.05, -0.24);
+        recoilGroup.add(backblastNode);
+
         const sensorOptic = new THREE.Mesh(createSculptedArmorDomeGeo(0.065, 10, 10), MAT.amberGlow);
-        sensorOptic.position.set(0, 0.26, 0.36);
+        sensorOptic.position.set(0, 0.28, 0.36);
         recoilGroup.add(sensorOptic);
         pod.userData.muzzleOffset.set(0, 0.08, 0.58);
+        pod.userData.rocketTubeMuzzles = rocketTubeMuzzles;
+        pod.userData.rocketWarheadTips = rocketWarheadTips;
+        pod.userData.backblastNode = backblastNode;
     }
     else if (wType === 'shield') {
         // AEGIS FORCEFIELD SHIELD GENERATOR POD (Projects 10.5m Protective Energy Dome!)
@@ -5732,43 +5745,56 @@ function createVehicleModel(vType) {
         };
     }
     else if (vType === 'heli') {
-        // SCULPTED AH-99 VALKYRIE GUNSHIP HELICOPTER (With Articulated Under-Belly Rotary Minigun Turret & Muzzle Flash!)
+        // REDESIGNED AH-99 BANSHEE / VALKYRIE HEAVY ATTACK GUNSHIP HELICOPTER
+        // Features layered military armor fuselage, tandem armored glass canopies, FLIR chin turret,
+        // articulated 6-barrel rotary cannon, stub wings with missile hardpoints + Hydra pods,
+        // landing skids with struts, 4-blade main rotor + shrouded tail rotor, and WebGL thrust cones.
         const airframe = new THREE.Group();
         group.add(airframe);
 
-        const fuselage = new THREE.Mesh(createExtrudedArmorHullGeo(0.82, 0.66, 2.12, 0.08, 0.24), MAT.terranPlating);
+        const fuselage = new THREE.Mesh(createExtrudedArmorHullGeo(0.86, 0.68, 2.24, 0.09, 0.26), MAT.terranPlating);
         fuselage.castShadow = true;
+        const dorsalSpine = new THREE.Mesh(createExtrudedArmorHullGeo(0.54, 0.26, 1.82, 0.05, 0.18), MAT.gunmetal);
+        dorsalSpine.position.set(0, 0.38, -0.14);
+        const cheekLeft = new THREE.Mesh(createExtrudedArmorHullGeo(0.18, 0.28, 1.38, 0.04, 0.12), MAT.terranBlue);
+        cheekLeft.position.set(-0.46, -0.06, 0.24);
+        const cheekRight = cheekLeft.clone();
+        cheekRight.position.x = 0.46;
+        airframe.add(dorsalSpine, cheekLeft, cheekRight);
 
         const noseLathePts = [
-            new THREE.Vector2(0.0, 0.82),
-            new THREE.Vector2(0.16, 0.72),
-            new THREE.Vector2(0.28, 0.42),
-            new THREE.Vector2(0.36, 0.0)
+            new THREE.Vector2(0.0, 0.86),
+            new THREE.Vector2(0.18, 0.74),
+            new THREE.Vector2(0.30, 0.44),
+            new THREE.Vector2(0.38, 0.0)
         ];
         const noseCone = new THREE.Mesh(new THREE.LatheGeometry(noseLathePts, 18), MAT.terranBlue);
         noseCone.rotation.x = Math.PI / 2;
-        noseCone.scale.set(1.05, 0.78, 1.0);
-        noseCone.position.set(0, -0.06, 0.98);
+        noseCone.scale.set(1.06, 0.80, 1.04);
+        noseCone.position.set(0, -0.06, 1.02);
 
-        // Compound Curved Bubble Armored Glass Canopies (Pilot + Gunner)
-        const gunnerCanopy = new THREE.Mesh(createExtrudedArmorHullGeo(0.58, 0.34, 0.76, 0.06, 0.18), MAT.canopyGlass);
+        // Tandem Stepped Armored Glass Canopies (Front Gunner + Elevated Pilot) + Canopy Frame Ribs
+        const gunnerCanopy = new THREE.Mesh(createExtrudedArmorHullGeo(0.58, 0.34, 0.78, 0.06, 0.18), MAT.canopyGlass);
         gunnerCanopy.rotation.x = 0.22;
-        gunnerCanopy.position.set(0, 0.24, 0.68);
-        const pilotCanopy = new THREE.Mesh(createExtrudedArmorHullGeo(0.64, 0.36, 0.84, 0.06, 0.2), MAT.canopyGlass);
-        pilotCanopy.position.set(0, 0.38, 0.05);
+        gunnerCanopy.position.set(0, 0.25, 0.70);
+        const pilotCanopy = new THREE.Mesh(createExtrudedArmorHullGeo(0.64, 0.38, 0.88, 0.06, 0.20), MAT.canopyGlass);
+        pilotCanopy.position.set(0, 0.42, 0.04);
+        const canopyFrame = new THREE.Mesh(createExtrudedArmorHullGeo(0.66, 0.05, 1.48, 0.02, 0.04), MAT.darkSteel);
+        canopyFrame.position.set(0, 0.22, 0.36);
+        airframe.add(canopyFrame);
 
-        // FLIR Optical Target Sensor Ball under Nose
-        const flirBall = new THREE.Mesh(createSculptedArmorDomeGeo(0.14, 16, 14), MAT.copper);
-        flirBall.position.set(0, -0.14, 1.65);
-        const flirEye = new THREE.Mesh(createSculptedArmorDomeGeo(0.075, 12, 12), MAT.cyanGlow);
-        flirEye.position.set(0, -0.14, 1.75);
+        // FLIR Optical Target Sensor Turret under Nose
+        const flirBall = new THREE.Mesh(createSculptedArmorDomeGeo(0.15, 16, 14), MAT.copper);
+        flirBall.position.set(0, -0.14, 1.70);
+        const flirEye = new THREE.Mesh(createSculptedArmorDomeGeo(0.08, 12, 12), MAT.cyanGlow);
+        flirEye.position.set(0, -0.14, 1.80);
 
-        // --- ARTICULATED UNDER-BELLY 6-BARREL ROTARY MINIGUN TURRET + 3D MUZZLE FLASH ---
+        // --- ARTICULATED UNDER-BELLY 6-BARREL ROTARY MINIGUN TURRET + MUZZLE NODE ---
         const bellyTurret = new THREE.Group();
         snapUnitTurretToHardpoint(bellyTurret, 'heli_belly_turret');
 
         const gimbalYoke = new THREE.Mesh(createSculptedLatheBarrelGeo(0.20, 0.24, 0.22, 12), MAT.darkSteel);
-        const ammoDrum = new THREE.Mesh(createExtrudedArmorHullGeo(0.36, 0.22, 0.34, 0.02, 0.06), MAT.terranBlue);
+        const ammoDrum = new THREE.Mesh(createExtrudedArmorHullGeo(0.38, 0.24, 0.36, 0.02, 0.06), MAT.terranBlue);
         ammoDrum.position.set(0, -0.12, -0.06);
         bellyTurret.add(gimbalYoke, ammoDrum);
 
@@ -5778,89 +5804,132 @@ function createVehicleModel(vType) {
         const bellyMinigunCluster = new THREE.Group();
         for (let b = 0; b < 6; b++) {
             const a = (b / 6) * Math.PI * 2;
-            const bTube = new THREE.Mesh(createSculptedLatheBarrelGeo(0.022, 0.022, 0.72, 6), MAT.darkSteel);
+            const bTube = new THREE.Mesh(createSculptedLatheBarrelGeo(0.024, 0.024, 0.76, 6), MAT.darkSteel);
             bTube.rotation.x = Math.PI / 2;
-            bTube.position.set(Math.cos(a) * 0.075, Math.sin(a) * 0.075, 0.38);
+            bTube.position.set(Math.cos(a) * 0.078, Math.sin(a) * 0.078, 0.40);
             bellyMinigunCluster.add(bTube);
         }
-        const barrelClamp = new THREE.Mesh(createSculptedLatheBarrelGeo(0.11, 0.11, 0.06, 12), MAT.copper);
+        const barrelClamp = new THREE.Mesh(createSculptedLatheBarrelGeo(0.115, 0.115, 0.07, 12), MAT.copper);
         barrelClamp.rotation.x = Math.PI / 2;
-        barrelClamp.position.z = 0.62;
+        barrelClamp.position.z = 0.65;
         bellyMinigunCluster.add(barrelClamp);
 
-        // Belly Minigun Muzzle Locator (muzzle flash uses dynamic 3D particle bursts instead of basic shapes!)
         const bellyMuzzleFlash = new THREE.Group();
-        bellyMuzzleFlash.position.set(0, 0, 0.82);
+        bellyMuzzleFlash.position.set(0, 0, 0.84);
         bellyMuzzleFlash.visible = false;
 
         const bellyMuzzle = new THREE.Object3D();
-        bellyMuzzle.position.set(0, 0, 0.85);
+        bellyMuzzle.position.set(0, 0, 0.88);
 
         bellyPitchPivot.add(bellyMinigunCluster, bellyMuzzleFlash, bellyMuzzle);
         bellyTurret.add(bellyPitchPivot);
         airframe.add(bellyTurret);
 
-        // Twin Side Turbo-Shaft Engine Nacelles & Thruster Particle Nozzles
+        // Twin Side Turbo-Shaft Engine Nacelles, WebGL Thrust Cones & Landing Skids with Struts
         const thrusterNozzles = [];
-        [-0.48, 0.48].forEach(ex => {
-            const nacelle = new THREE.Mesh(createSculptedLatheBarrelGeo(0.21, 0.23, 1.08, 16), MAT.gunmetal);
+        const thrustAssemblies = [];
+        [-0.50, 0.50].forEach(ex => {
+            const nacelle = new THREE.Mesh(createSculptedLatheBarrelGeo(0.22, 0.24, 1.14, 16), MAT.gunmetal);
             nacelle.rotation.x = Math.PI / 2;
-            nacelle.position.set(ex, 0.16, -0.18);
-            const intake = new THREE.Mesh(createSculptedTorusCollarGeo(0.17, 0.035, 10, 16), MAT.copper);
-            intake.position.set(ex, 0.16, 0.36);
+            nacelle.position.set(ex, 0.18, -0.18);
+            const intake = new THREE.Mesh(createSculptedTorusCollarGeo(0.18, 0.038, 10, 16), MAT.copper);
+            intake.position.set(ex, 0.18, 0.39);
+            const exhaustShroud = new THREE.Mesh(createSculptedLatheBarrelGeo(0.16, 0.21, 0.24, 14), MAT.darkSteel);
+            exhaustShroud.rotation.x = Math.PI / 2;
+            exhaustShroud.position.set(ex, 0.18, -0.78);
+
             const exhaustNozzle = new THREE.Object3D();
-            exhaustNozzle.position.set(ex, 0.16, -0.76);
-            thrusterNozzles.push({ node: exhaustNozzle, dir: new THREE.Vector3(0, -0.12, -1).normalize(), color: 'amber', scale: 0.72 });
-            airframe.add(nacelle, intake, exhaustNozzle);
+            exhaustNozzle.position.set(ex, 0.18, -0.88);
+            thrusterNozzles.push({ node: exhaustNozzle, dir: new THREE.Vector3(0, -0.10, -1).normalize(), color: 'amber', scale: 0.76 });
 
-            const skid = new THREE.Mesh(createSculptedLatheBarrelGeo(0.032, 0.032, 1.58, 12), MAT.darkSteel);
+            if (window.THRUST_FX_SYSTEM) {
+                const plume = window.THRUST_FX_SYSTEM.createThrusterAssembly({
+                    coreColor: 0xffd166,
+                    glowColor: 0xff6b00,
+                    radius: 0.15,
+                    length: 0.72,
+                    scrollSpeed: 5.4
+                });
+                plume.position.set(ex, 0.18, -0.86);
+                airframe.add(plume);
+                thrustAssemblies.push(plume);
+            }
+
+            airframe.add(nacelle, intake, exhaustShroud, exhaustNozzle);
+
+            // Landing Skid & Twin Angled Support Struts
+            const skid = new THREE.Mesh(createSculptedLatheBarrelGeo(0.035, 0.035, 1.68, 12), MAT.darkSteel);
             skid.rotation.x = Math.PI / 2;
-            skid.position.set(ex * 1.15, -0.48, 0.1);
-            airframe.add(skid);
+            skid.position.set(ex * 1.14, -0.50, 0.10);
+            const strutFront = new THREE.Mesh(createSculptedLatheBarrelGeo(0.022, 0.022, 0.42, 8), MAT.gunmetal);
+            strutFront.position.set(ex * 0.96, -0.34, 0.48);
+            strutFront.rotation.z = ex > 0 ? 0.38 : -0.38;
+            const strutRear = strutFront.clone();
+            strutRear.position.z = -0.32;
+            airframe.add(skid, strutFront, strutRear);
         });
 
-        // Swept Aerodynamic Weapon Pylons + Hydra Rocket Pods
-        const stubWing = new THREE.Mesh(createExtrudedArmorHullGeo(2.18, 0.11, 0.44, 0.03, 0.12), MAT.terranBlue);
-        stubWing.position.set(0, -0.06, 0.08);
-        [-0.75, 0.75].forEach(wx => {
-            const rocketPod = new THREE.Mesh(createSculptedLatheBarrelGeo(0.155, 0.155, 0.64, 16), MAT.darkSteel);
+        // Swept Aerodynamic Stub Wings + Inner Hydra Rocket Pods + Outer AGM Hardpoints & Muzzle Nodes
+        const stubWing = new THREE.Mesh(createExtrudedArmorHullGeo(2.36, 0.12, 0.48, 0.03, 0.12), MAT.terranBlue);
+        stubWing.position.set(0, -0.05, 0.08);
+        const wingMuzzles = [];
+        [-0.78, 0.78].forEach((wx, idx) => {
+            const pylon = new THREE.Mesh(createExtrudedArmorHullGeo(0.08, 0.18, 0.36), MAT.gunmetal);
+            pylon.position.set(wx, -0.15, 0.10);
+            const rocketPod = new THREE.Mesh(createSculptedLatheBarrelGeo(0.165, 0.165, 0.68, 16), MAT.darkSteel);
             rocketPod.rotation.x = Math.PI / 2;
-            rocketPod.position.set(wx, -0.22, 0.12);
-            const podFace = new THREE.Mesh(createSculptedLatheBarrelGeo(0.145, 0.145, 0.03, 16), MAT.hazard);
+            rocketPod.position.set(wx, -0.24, 0.14);
+            const podFace = new THREE.Mesh(createSculptedLatheBarrelGeo(0.155, 0.155, 0.04, 16), MAT.hazard);
             podFace.rotation.x = Math.PI / 2;
-            podFace.position.set(wx, -0.22, 0.45);
-            const wingtipLight = new THREE.Mesh(createSculptedArmorDomeGeo(0.055, 12, 12), wx < 0 ? MAT.medicCross : MAT.healGlow);
-            wingtipLight.position.set(wx * 1.42, -0.06, 0.08);
-            airframe.add(rocketPod, podFace, wingtipLight);
+            podFace.position.set(wx, -0.24, 0.49);
+
+            // Outer Hellfire Rail Missile
+            const outerPylon = new THREE.Mesh(createExtrudedArmorHullGeo(0.06, 0.14, 0.30), MAT.darkSteel);
+            outerPylon.position.set(wx * 1.32, -0.13, 0.08);
+            const hellfire = new THREE.Mesh(createSculptedOgiveSpireGeo(0.045, 0.56, 10), MAT.crimsonTank);
+            hellfire.rotation.x = Math.PI / 2;
+            hellfire.position.set(wx * 1.32, -0.21, 0.22);
+
+            const podMuzzle = new THREE.Object3D();
+            podMuzzle.position.set(wx, -0.24, 0.56);
+            airframe.add(pylon, rocketPod, podFace, outerPylon, hellfire, podMuzzle);
+            wingMuzzles.push(podMuzzle);
+
+            const wingtipLight = new THREE.Mesh(createSculptedArmorDomeGeo(0.058, 12, 12), idx === 0 ? MAT.medicCross : MAT.healGlow);
+            wingtipLight.position.set(wx * 1.50, -0.05, 0.08);
+            airframe.add(wingtipLight);
         });
 
-        // Tapered Tail Boom, Swept Vertical Fin, Horizontal Stabilizer & Spinning Tail Rotor
-        const tailBoom = new THREE.Mesh(createSculptedLatheBarrelGeo(0.12, 0.29, 1.78, 16), MAT.terranPlating);
+        // Tapered Armored Tail Boom, Swept Vertical Fin, Horizontal Stabilizer & Shrouded Tail Rotor
+        const tailBoom = new THREE.Mesh(createSculptedLatheBarrelGeo(0.13, 0.30, 1.84, 16), MAT.terranPlating);
         tailBoom.rotation.x = Math.PI / 2;
-        tailBoom.position.set(0, 0.05, -1.65);
-        const vFin = new THREE.Mesh(createExtrudedArmorHullGeo(0.1, 0.68, 0.44, 0.025, 0.1), MAT.terranBlue);
+        tailBoom.position.set(0, 0.06, -1.68);
+        const vFin = new THREE.Mesh(createExtrudedArmorHullGeo(0.11, 0.72, 0.48, 0.025, 0.1), MAT.terranBlue);
         vFin.rotation.x = -0.35;
-        vFin.position.set(0, 0.34, -2.42);
-        const hStab = new THREE.Mesh(createExtrudedArmorHullGeo(0.76, 0.06, 0.26, 0.015, 0.06), MAT.hazard);
-        hStab.position.set(0, 0.58, -2.52);
+        vFin.position.set(0, 0.36, -2.46);
+        const hStab = new THREE.Mesh(createExtrudedArmorHullGeo(0.82, 0.06, 0.28, 0.015, 0.06), MAT.hazard);
+        hStab.position.set(0, 0.60, -2.54);
 
         const tailRotor = new THREE.Group();
-        tailRotor.position.set(0.12, 0.38, -2.48);
-        const tr1 = new THREE.Mesh(createExtrudedArmorHullGeo(0.03, 0.68, 0.07), MAT.darkSteel);
-        const tr2 = new THREE.Mesh(createExtrudedArmorHullGeo(0.03, 0.07, 0.68), MAT.darkSteel);
+        tailRotor.position.set(0.13, 0.38, -2.50);
+        const tr1 = new THREE.Mesh(createExtrudedArmorHullGeo(0.03, 0.70, 0.08), MAT.darkSteel);
+        const tr2 = new THREE.Mesh(createExtrudedArmorHullGeo(0.03, 0.08, 0.70), MAT.darkSteel);
         tailRotor.add(tr1, tr2);
 
-        // 4-Blade Main Rotor Mast & Hub
+        // 4-Blade Main Rotor Mast, Swashplate & Rotor Blur Ring
         const rotor = new THREE.Group();
-        rotor.position.set(0, 0.64, -0.05);
-        const hub = new THREE.Mesh(createSculptedLatheBarrelGeo(0.16, 0.21, 0.18, 16), MAT.darkSteel);
-        rotor.add(hub);
+        rotor.position.set(0, 0.66, -0.05);
+        const hub = new THREE.Mesh(createSculptedLatheBarrelGeo(0.18, 0.23, 0.20, 16), MAT.darkSteel);
+        const swashRing = new THREE.Mesh(createSculptedTorusCollarGeo(0.24, 0.025, 8, 18), MAT.copper);
+        swashRing.rotation.x = Math.PI / 2;
+        swashRing.position.y = -0.06;
+        rotor.add(hub, swashRing);
         for (let b = 0; b < 2; b++) {
-            const blade = new THREE.Mesh(createExtrudedArmorHullGeo(2.95, 0.03, 0.16), MAT.darkSteel);
+            const blade = new THREE.Mesh(createExtrudedArmorHullGeo(3.08, 0.032, 0.17), MAT.darkSteel);
             blade.rotation.y = (b * Math.PI) / 2;
-            const tipA = new THREE.Mesh(createExtrudedArmorHullGeo(0.18, 0.035, 0.165), MAT.hazard);
-            tipA.position.x = 1.4;
-            const tipB = tipA.clone(); tipB.position.x = -1.4;
+            const tipA = new THREE.Mesh(createExtrudedArmorHullGeo(0.20, 0.036, 0.175), MAT.hazard);
+            tipA.position.x = 1.44;
+            const tipB = tipA.clone(); tipB.position.x = -1.44;
             blade.add(tipA, tipB);
             rotor.add(blade);
         }
@@ -5870,7 +5939,11 @@ function createVehicleModel(vType) {
             isVehicle: true, isAir: true, vType: 'heli',
             airframe, rotor, tailRotor, tailBoom, vFin, hStab,
             bellyTurret, bellyPitchPivot, bellyMinigunCluster, bellyMuzzleFlash, bellyMuzzle,
+            rocketMuzzleLeft: wingMuzzles[0],
+            rocketMuzzleRight: wingMuzzles[1],
+            wingMuzzles,
             thrusterNozzles,
+            thrustAssemblies,
             phase: Math.random() * 10, attackAnim: 0
         };
     }
@@ -5983,6 +6056,230 @@ function createVehicleModel(vType) {
             isVehicle: true, isAir: true, vType: 'transport',
             airframe, rotors, nacelles, cargoRamp, thrusterNozzles,
             dropAnim: 0, phase: Math.random() * 10
+        };
+    }
+    else if (vType === 'medivac') {
+        // ====================================================================
+        // TERRAN MEDIVAC CADUCEUS MEDICAL DROPSHIP (Support Aircraft with Autonomous Healing Beam)
+        // ====================================================================
+        const airframe = new THREE.Group();
+        group.add(airframe);
+
+        const hullMat = MAT.medivacHull || MAT.sandArmor;
+        const redMat = MAT.medivacRed || MAT.medicCross;
+
+        // Main Medical Bay Fuselage + Dorsal Caduceus Reactor Spine
+        const hull = new THREE.Mesh(createExtrudedArmorHullGeo(1.48, 0.76, 2.58, 0.09, 0.26), hullMat);
+        hull.castShadow = true;
+        const upperSpine = new THREE.Mesh(createExtrudedArmorHullGeo(1.04, 0.28, 2.18, 0.06, 0.20), MAT.gunmetal);
+        upperSpine.position.set(0, 0.46, -0.06);
+        const bellyBay = new THREE.Mesh(createExtrudedArmorHullGeo(1.30, 0.24, 2.08, 0.05, 0.18), MAT.darkSteel);
+        bellyBay.position.set(0, -0.42, -0.04);
+        airframe.add(hull, upperSpine, bellyBay);
+
+        // Dorsal & Side Red Medical Cross Emblems
+        const crossH = new THREE.Mesh(createExtrudedArmorHullGeo(0.68, 0.05, 0.22), redMat);
+        crossH.position.set(0, 0.62, 0.08);
+        const crossV = new THREE.Mesh(createExtrudedArmorHullGeo(0.22, 0.05, 0.68), redMat);
+        crossV.position.set(0, 0.62, 0.08);
+        airframe.add(crossH, crossV);
+
+        [-0.75, 0.75].forEach(sx => {
+            const sideCrossA = new THREE.Mesh(createExtrudedArmorHullGeo(0.06, 0.42, 0.14), redMat);
+            sideCrossA.position.set(sx, 0.04, 0.05);
+            const sideCrossB = new THREE.Mesh(createExtrudedArmorHullGeo(0.06, 0.14, 0.42), redMat);
+            sideCrossB.position.set(sx, 0.04, 0.05);
+            const sideStripe = new THREE.Mesh(createExtrudedArmorHullGeo(0.08, 0.12, 1.72), redMat);
+            sideStripe.position.set(sx, -0.24, -0.04);
+            airframe.add(sideCrossA, sideCrossB, sideStripe);
+        });
+
+        // Forward Cockpit Canopy, Medical Sensor Nose & Ventral Caduceus Heal Emitter
+        const nose = new THREE.Mesh(createExtrudedArmorHullGeo(1.18, 0.52, 0.80, 0.07, 0.20), hullMat);
+        nose.position.set(0, -0.06, 1.48);
+        const cockpit = new THREE.Mesh(createExtrudedArmorHullGeo(1.02, 0.36, 0.82, 0.06, 0.18), MAT.canopyGlass);
+        cockpit.rotation.x = 0.26;
+        cockpit.position.set(0, 0.22, 1.28);
+        const healTurretDome = new THREE.Mesh(createSculptedArmorDomeGeo(0.22, 16, 14), MAT.healGlow);
+        healTurretDome.position.set(0, -0.52, 0.65);
+        const healEmitterNode = new THREE.Object3D();
+        healEmitterNode.position.set(0, -0.56, 0.72);
+        airframe.add(nose, cockpit, healTurretDome, healEmitterNode);
+
+        // Twin VTOL Tilt-Engine Pods + WebGL Thrust Cones + Landing Skids
+        const thrusterNozzles = [];
+        const thrustAssemblies = [];
+        const nacelles = [];
+        const rotors = [];
+        [-1.18, 1.18].forEach(xOff => {
+            const wingPylon = new THREE.Mesh(createExtrudedArmorHullGeo(0.78, 0.18, 0.48, 0.03, 0.10), hullMat);
+            wingPylon.position.set(xOff * 0.70, 0.14, 0.10);
+            airframe.add(wingPylon);
+
+            const nacellePivot = new THREE.Group();
+            nacellePivot.position.set(xOff, 0.16, 0.10);
+            const nacelleBody = new THREE.Mesh(createSculptedLatheBarrelGeo(0.24, 0.28, 0.86, 16), MAT.gunmetal);
+            nacelleBody.rotation.x = Math.PI / 2;
+            const redCowling = new THREE.Mesh(createSculptedTorusCollarGeo(0.23, 0.04, 10, 16), redMat);
+            redCowling.position.z = 0.40;
+
+            const aftNozzle = new THREE.Object3D();
+            aftNozzle.position.set(0, 0, -0.48);
+            thrusterNozzles.push({ node: aftNozzle, dir: new THREE.Vector3(0, -0.25, -1).normalize(), color: 'cyan', scale: 0.78 });
+
+            if (window.THRUST_FX_SYSTEM) {
+                const plume = window.THRUST_FX_SYSTEM.createThrusterAssembly({
+                    coreColor: 0x80ffdb,
+                    glowColor: 0x00b4d8,
+                    radius: 0.17,
+                    length: 0.78,
+                    scrollSpeed: 5.2
+                });
+                plume.position.set(0, 0, -0.46);
+                nacellePivot.add(plume);
+                thrustAssemblies.push(plume);
+            }
+
+            const vtolFan = new THREE.Group();
+            vtolFan.position.set(0, 0.28, 0);
+            const f1 = new THREE.Mesh(createExtrudedArmorHullGeo(1.15, 0.03, 0.12), MAT.darkSteel);
+            const f2 = f1.clone(); f2.rotation.y = Math.PI / 2;
+            vtolFan.add(f1, f2);
+            rotors.push(vtolFan);
+
+            nacellePivot.add(nacelleBody, redCowling, aftNozzle, vtolFan);
+            airframe.add(nacellePivot);
+            nacelles.push(nacellePivot);
+
+            const skid = new THREE.Mesh(createSculptedLatheBarrelGeo(0.038, 0.038, 1.96, 10), MAT.darkSteel);
+            skid.rotation.x = Math.PI / 2;
+            skid.position.set(xOff * 0.48, -0.58, 0.05);
+            airframe.add(skid);
+        });
+
+        group.userData = {
+            isVehicle: true, isAir: true, vType: 'medivac',
+            airframe, nacelles, rotors, healEmitterNode, healTurretDome,
+            thrusterNozzles, thrustAssemblies,
+            phase: Math.random() * 10, attackAnim: 0
+        };
+    }
+    else if (vType === 'battlecruiser') {
+        // ====================================================================
+        // TERRAN MINOTAUR / HYPERION CLASS BATTLECRUISER CAPITAL SHIP
+        // Features hammerhead prow with Yamato Cannon core, dorsal command bridge tower,
+        // layered armored hull plating, 4 broadside laser turret batteries, and 4 ion engine nacelles.
+        // ====================================================================
+        const airframe = new THREE.Group();
+        group.add(airframe);
+
+        const hullMat = MAT.battlecruiserHull || MAT.terranPlating;
+        const darkMat = MAT.battlecruiserDark || MAT.darkSteel;
+
+        // 1. Central Spine & Layered Armored Deck
+        const centralHull = new THREE.Mesh(createExtrudedArmorHullGeo(1.65, 0.82, 4.10, 0.12, 0.32), hullMat);
+        centralHull.castShadow = true;
+        const dorsalDeck = new THREE.Mesh(createExtrudedArmorHullGeo(1.18, 0.36, 3.20, 0.08, 0.24), darkMat);
+        dorsalDeck.position.set(0, 0.48, -0.15);
+        const ventralKeel = new THREE.Mesh(createExtrudedArmorHullGeo(1.24, 0.32, 3.40, 0.08, 0.24), darkMat);
+        ventralKeel.position.set(0, -0.46, -0.05);
+        airframe.add(centralHull, dorsalDeck, ventralKeel);
+
+        // 2. Iconic Hammerhead Prow & Forward Yamato Cannon Core
+        const hammerheadProw = new THREE.Mesh(createExtrudedArmorHullGeo(2.85, 0.68, 1.18, 0.10, 0.26), hullMat);
+        hammerheadProw.position.set(0, 0.04, 1.95);
+        const prowCollar = new THREE.Mesh(createExtrudedArmorHullGeo(2.96, 0.24, 0.88, 0.06, 0.16), MAT.terranBlue);
+        prowCollar.position.set(0, 0.22, 1.98);
+        const yamatoShroud = new THREE.Mesh(createSculptedLatheBarrelGeo(0.42, 0.52, 0.65, 16), darkMat);
+        yamatoShroud.rotation.x = Math.PI / 2;
+        yamatoShroud.position.set(0, 0.02, 2.48);
+        const yamatoCoreMesh = new THREE.Mesh(createSculptedArmorDomeGeo(0.32, 16, 16), MAT.amberGlow);
+        yamatoCoreMesh.position.set(0, 0.02, 2.66);
+        const muzzleMain = new THREE.Object3D();
+        muzzleMain.position.set(0, 0.02, 2.86);
+        airframe.add(hammerheadProw, prowCollar, yamatoShroud, yamatoCoreMesh, muzzleMain);
+
+        // 3. Elevated Dorsal Command Bridge Tower & Sensor Arrays
+        const bridgeNeck = new THREE.Mesh(createExtrudedArmorHullGeo(0.68, 0.72, 0.84, 0.05, 0.14), darkMat);
+        bridgeNeck.position.set(0, 0.92, -1.05);
+        const bridgeHead = new THREE.Mesh(createExtrudedArmorHullGeo(1.52, 0.42, 0.82, 0.06, 0.16), hullMat);
+        bridgeHead.position.set(0, 1.38, -1.02);
+        const bridgeGlass = new THREE.Mesh(createExtrudedArmorHullGeo(1.36, 0.18, 0.46), MAT.cyanGlow);
+        bridgeGlass.position.set(0, 1.40, -0.78);
+        const commMast = new THREE.Mesh(createSculptedLatheBarrelGeo(0.05, 0.08, 0.62, 8), MAT.silver || hullMat);
+        commMast.position.set(0, 1.82, -1.12);
+        airframe.add(bridgeNeck, bridgeHead, bridgeGlass, commMast);
+
+        // 4. Broadside Armored Sponsons & 4 Articulated Dual-Laser Turret Batteries
+        const laserTurrets = [];
+        const laserMuzzles = [];
+        [-1.36, 1.36].forEach((bx, sideIdx) => {
+            const sponsonWing = new THREE.Mesh(createExtrudedArmorHullGeo(1.22, 0.44, 2.38, 0.08, 0.22), hullMat);
+            sponsonWing.position.set(bx, -0.02, -0.18);
+            const wingTrim = new THREE.Mesh(createExtrudedArmorHullGeo(1.28, 0.12, 1.96), MAT.terranBlue);
+            wingTrim.position.set(bx, 0.18, -0.18);
+            airframe.add(sponsonWing, wingTrim);
+
+            [-0.65, 0.55].forEach((tz) => {
+                const tPivot = new THREE.Group();
+                tPivot.position.set(bx * 0.95, 0.28, tz);
+                const tDome = new THREE.Mesh(createSculptedArmorDomeGeo(0.18, 12, 10), darkMat);
+                const bLeft = new THREE.Mesh(createSculptedLatheBarrelGeo(0.032, 0.032, 0.48, 8), MAT.silver || hullMat);
+                bLeft.rotation.x = Math.PI / 2;
+                bLeft.position.set(-0.06, 0.06, 0.24);
+                const bRight = bLeft.clone();
+                bRight.position.x = 0.06;
+                const lMuzzle = new THREE.Object3D();
+                lMuzzle.position.set(0, 0.06, 0.52);
+                tPivot.add(tDome, bLeft, bRight, lMuzzle);
+                airframe.add(tPivot);
+                laserTurrets.push(tPivot);
+                laserMuzzles.push(lMuzzle);
+            });
+        });
+
+        // 5. Four Heavy Rear Ion Engine Nacelles + WebGL Thrust Cones
+        const thrusterNozzles = [];
+        const thrustAssemblies = [];
+        [
+            [-0.95, 0.18, -2.18, 0.30],
+            [-0.36, 0.06, -2.26, 0.34],
+            [0.36, 0.06, -2.26, 0.34],
+            [0.95, 0.18, -2.18, 0.30]
+        ].forEach(([ex, ey, ez, er]) => {
+            const nozzleBell = new THREE.Mesh(createSculptedLatheBarrelGeo(er * 0.78, er, 0.54, 16), darkMat);
+            nozzleBell.rotation.x = Math.PI / 2;
+            nozzleBell.position.set(ex, ey, ez);
+            const coreGlow = new THREE.Mesh(createSculptedArmorDomeGeo(er * 0.72, 12, 12), MAT.cyanGlow);
+            coreGlow.position.set(ex, ey, ez - 0.22);
+
+            const emitNode = new THREE.Object3D();
+            emitNode.position.set(ex, ey, ez - 0.32);
+            thrusterNozzles.push({ node: emitNode, dir: new THREE.Vector3(0, -0.05, -1).normalize(), color: 'cyan', scale: 1.05 });
+
+            if (window.THRUST_FX_SYSTEM) {
+                const plume = window.THRUST_FX_SYSTEM.createThrusterAssembly({
+                    coreColor: 0x90e0ef,
+                    glowColor: 0x0077b6,
+                    radius: er * 0.76,
+                    length: 1.25,
+                    scrollSpeed: 6.0
+                });
+                plume.position.set(ex, ey, ez - 0.26);
+                airframe.add(plume);
+                thrustAssemblies.push(plume);
+            }
+            airframe.add(nozzleBell, coreGlow, emitNode);
+        });
+
+        group.userData = {
+            isVehicle: true, isAir: true, vType: 'battlecruiser',
+            airframe, yamatoCoreMesh, muzzleMain,
+            muzzleLaserLeft: laserMuzzles[0],
+            muzzleLaserRight: laserMuzzles[2],
+            laserTurrets, laserMuzzles,
+            thrusterNozzles, thrustAssemblies,
+            yamatoCharge: 0, phase: Math.random() * 10, attackAnim: 0
         };
     }
     else if (vType === 'valkyrie') {
@@ -6425,7 +6722,7 @@ function createReaperGaussPistol() {
 }
 
 function createAnimatedUnitModel(role) {
-    if (['tank', 'siege_tank', 'heli', 'transport', 'valkyrie'].includes(role)) {
+    if (['tank', 'siege_tank', 'heli', 'transport', 'medivac', 'battlecruiser', 'valkyrie'].includes(role)) {
         return createVehicleModel(role);
     }
 
@@ -9097,7 +9394,13 @@ function updateUnitAnimation(mesh, dt, isMoving, aimTargetPos = null) {
                 }
             }
         }
-        if (ud.vType === 'transport') {
+        if (ud.thrustAssemblies && ud.thrustAssemblies.length > 0 && window.THRUST_FX_SYSTEM) {
+            const targetThrottle = isMoving ? 1.45 : (ud.attackAnim > 0.1 ? 1.15 : 0.78);
+            for (let ti = 0; ti < ud.thrustAssemblies.length; ti++) {
+                window.THRUST_FX_SYSTEM.setThrottle(ud.thrustAssemblies[ti], targetThrottle);
+            }
+        }
+        if (ud.vType === 'transport' || ud.vType === 'medivac') {
             if (ud.dropAnim > 0) ud.dropAnim = Math.max(0, ud.dropAnim - effDt * 1.4);
             if (ud.nacelles) {
                 const tiltAngle = isMoving ? 0.28 : -0.06;
@@ -9113,6 +9416,32 @@ function updateUnitAnimation(mesh, dt, isMoving, aimTargetPos = null) {
             if (ud.airframe) {
                 ud.airframe.position.y = Math.sin(ud.phase * 0.45) * 0.08;
                 ud.airframe.rotation.z = Math.cos(ud.phase * 0.35) * 0.04;
+                ud.airframe.rotation.x = THREE.MathUtils.lerp(ud.airframe.rotation.x || 0, isMoving ? 0.10 : 0.0, Math.min(1, effDt * 6));
+            }
+            if (ud.healTurretDome) {
+                const hPulse = 0.92 + Math.sin(ud.phase * 1.6) * 0.14;
+                ud.healTurretDome.scale.setScalar(hPulse);
+            }
+        }
+        if (ud.vType === 'battlecruiser' && ud.airframe) {
+            ud.airframe.position.y = Math.sin(ud.phase * 0.28) * 0.09;
+            ud.airframe.rotation.z = Math.cos(ud.phase * 0.22) * 0.025;
+            ud.airframe.rotation.x = THREE.MathUtils.lerp(ud.airframe.rotation.x || 0, isMoving ? 0.045 : 0.0, Math.min(1, effDt * 4));
+            if (ud.yamatoCoreMesh) {
+                const yPulse = 0.95 + Math.sin(ud.phase * 1.8) * 0.12 + (ud.attackAnim || 0) * 0.45;
+                ud.yamatoCoreMesh.scale.setScalar(yPulse);
+            }
+            if (ud.laserTurrets && ud.laserTurrets.length > 0) {
+                for (let li = 0; li < ud.laserTurrets.length; li++) {
+                    const lt = ud.laserTurrets[li];
+                    if (aimTargetPos) {
+                        const localAim = ud.airframe.worldToLocal(_animLocalAimScratch.copy(aimTargetPos));
+                        const desiredYaw = Math.atan2(localAim.x - lt.position.x, localAim.z - lt.position.z);
+                        lt.rotation.y = THREE.MathUtils.lerp(lt.rotation.y, desiredYaw, Math.min(1, effDt * 10));
+                    } else {
+                        lt.rotation.y = THREE.MathUtils.lerp(lt.rotation.y, 0, Math.min(1, effDt * 4));
+                    }
+                }
             }
         }
         // --- TRANSFORMABLE VALKYRIE VF-9 VARIABLE-FIGHTER & SEMI-MECH 3-SECOND LAND/FLY ANIMATION ---
@@ -9326,6 +9655,11 @@ function updateUnitAnimation(mesh, dt, isMoving, aimTargetPos = null) {
                     ud.bellyMuzzleFlash.rotation.z += effDt * 42;
                     ud.bellyMuzzleFlash.scale.setScalar(0.88 + Math.random() * 0.48);
                 }
+            }
+            if (ud.airframe) {
+                const targetPitch = isMoving ? 0.14 : (ud.attackAnim > 0.1 ? 0.06 : 0.0);
+                ud.airframe.rotation.x = THREE.MathUtils.lerp(ud.airframe.rotation.x || 0, targetPitch, Math.min(1, effDt * 7));
+                ud.airframe.position.y = Math.sin(ud.phase * 0.55) * 0.07;
             }
         }
 
@@ -13373,5 +13707,192 @@ window.spawnTerranBaseBlastCrater = function(pos, radiusScale = 2.4) {
     };
 })();
 
+// ============================================================================
+// EXACT WORLD-SPACE WEAPON MUZZLE POSITION RESOLVER
+// Ensures every turret, tank, siege tank, helicopter, battlecruiser, medivac,
+// ranged infantry, and rocket launcher fires from its actual barrel/tube tip.
+// ============================================================================
+const _muzzleWorldScratch = new THREE.Vector3();
+window.getWeaponMuzzleWorldPos = function(actorOrBld, slotIndex = 0, outVec = null) {
+    const target = outVec || new THREE.Vector3();
+    if (!actorOrBld) return target.set(0, 1, 0);
 
+    const mesh = actorOrBld.mesh || actorOrBld;
+    if (mesh && typeof mesh.updateMatrixWorld === 'function') {
+        mesh.updateMatrixWorld(true);
+    }
 
+    // 1. Turret / Building Ordnance Pod (Rocket tubes, dual barrels, mortar, plasma, laser)
+    if (actorOrBld.pod && actorOrBld.pod.userData) {
+        const pud = actorOrBld.pod.userData;
+        actorOrBld.pod.updateMatrixWorld(true);
+        if (Array.isArray(pud.rocketTubeMuzzles) && pud.rocketTubeMuzzles.length > 0) {
+            const idx = Math.abs(slotIndex) % pud.rocketTubeMuzzles.length;
+            const node = pud.rocketTubeMuzzles[idx];
+            if (node) return node.getWorldPosition(target);
+        }
+        if (pud.recoilGroup && pud.muzzleOffset) {
+            target.copy(pud.muzzleOffset);
+            return pud.recoilGroup.localToWorld(target);
+        }
+    }
+
+    // 2. Unit / Vehicle Muzzle Attachment Nodes
+    const ud = (mesh && mesh.userData) ? mesh.userData : null;
+    if (ud) {
+        if (ud.vType === 'heli') {
+            if (slotIndex === 1 && ud.rocketMuzzleLeft) return ud.rocketMuzzleLeft.getWorldPosition(target);
+            if (slotIndex === 2 && ud.rocketMuzzleRight) return ud.rocketMuzzleRight.getWorldPosition(target);
+            if (ud.bellyMuzzle) return ud.bellyMuzzle.getWorldPosition(target);
+        }
+        if (ud.vType === 'battlecruiser') {
+            if (slotIndex === 99 && ud.muzzleMain) return ud.muzzleMain.getWorldPosition(target);
+            if (Array.isArray(ud.laserMuzzles) && ud.laserMuzzles.length > 0) {
+                const idx = Math.abs(slotIndex) % ud.laserMuzzles.length;
+                return ud.laserMuzzles[idx].getWorldPosition(target);
+            }
+            if (ud.muzzleMain) return ud.muzzleMain.getWorldPosition(target);
+        }
+        if (ud.vType === 'medivac' && ud.healEmitterNode) {
+            return ud.healEmitterNode.getWorldPosition(target);
+        }
+        if (ud.tankMuzzle) {
+            return ud.tankMuzzle.getWorldPosition(target);
+        }
+        if (ud.gunTip) {
+            return ud.gunTip.getWorldPosition(target);
+        }
+    }
+
+    if (actorOrBld.pos) {
+        return target.set(actorOrBld.pos.x, (actorOrBld.pos.y || 0) + 1.25, actorOrBld.pos.z);
+    }
+    if (mesh && mesh.position) {
+        return target.copy(mesh.position).add(new THREE.Vector3(0, 1.2, 0));
+    }
+    return target.set(0, 1, 0);
+};
+
+// ============================================================================
+// FACTION-SPECIFIC 3D PROJECTILE VISUAL FACTORY
+// Replaces primitive shapes with multi-part faction projectiles & active exhausts
+// ============================================================================
+const PROJECTILE_VISUAL_FACTORY = {
+    createProjectileVisual(pType, opts = {}) {
+        const root = new THREE.Group();
+        root.name = `Projectile_${pType}`;
+        root.userData.pType = pType;
+        root.userData.faction = opts.faction || (
+            (pType === 'acid' || pType === 'bile' || pType === 'glaive' || pType === 'spine') ? 'zerg' :
+            ((pType === 'solaris' || pType === 'sunlance' || pType === 'phase_orb') ? 'solaris' : 'terran')
+        );
+
+        if (pType === 'rocket' || pType === 'missile') {
+            // TERRAN FINNED TACTICAL MISSILE WITH OGIVE WARHEAD, 4 STABILIZER FINS & THRUST PLUME
+            const body = new THREE.Mesh(createSculptedLatheBarrelGeo(0.052, 0.055, 0.56, 10), MAT.terranPlating || MAT.steelMat);
+            body.rotation.x = Math.PI / 2;
+            const warhead = new THREE.Mesh(createSculptedOgiveSpireGeo(0.054, 0.22, 10), MAT.crimsonTank || MAT.crimson);
+            warhead.rotation.x = Math.PI / 2;
+            warhead.position.z = 0.36;
+            const band = new THREE.Mesh(createSculptedTorusCollarGeo(0.054, 0.012, 6, 10), MAT.hazard);
+            band.position.z = 0.14;
+            root.add(body, warhead, band);
+
+            for (let f = 0; f < 4; f++) {
+                const fin = new THREE.Mesh(createExtrudedArmorHullGeo(0.18, 0.014, 0.14), MAT.darkSteel);
+                fin.rotation.z = (f * Math.PI) / 2;
+                fin.position.z = -0.20;
+                root.add(fin);
+            }
+
+            if (window.THRUST_FX_SYSTEM) {
+                const exhaust = window.THRUST_FX_SYSTEM.createThrusterAssembly({
+                    coreColor: 0xffe066,
+                    glowColor: 0xff5500,
+                    radius: 0.085,
+                    length: 0.48,
+                    scrollSpeed: 7.5
+                });
+                exhaust.position.z = -0.28;
+                root.add(exhaust);
+                root.userData.thrustAssembly = exhaust;
+            }
+        } else if (pType === 'tank' || pType === 'siege') {
+            // TERRAN ARMOR-PIERCING FIN-STABILIZED SABOT SHELL WITH TRACER SHEATH
+            const core = new THREE.Mesh(SHARED_FX_GEO.tankSabotShell, SHARED_FX_MAT.projTankCore);
+            const tip = new THREE.Mesh(SHARED_FX_GEO.tankSabotTip, SHARED_FX_MAT.projTankTip);
+            tip.position.z = 0.28;
+            const finA = new THREE.Mesh(SHARED_FX_GEO.tankFin, MAT.darkSteel);
+            finA.position.z = -0.18;
+            const finB = finA.clone();
+            finB.rotation.z = Math.PI / 2;
+            const shockRing = new THREE.Mesh(createSculptedTorusCollarGeo(0.09, 0.018, 6, 12), MAT.amberGlow);
+            shockRing.position.z = 0.08;
+            root.add(core, tip, finA, finB, shockRing);
+        } else if (pType === 'yamato') {
+            // BATTLECRUISER YAMATO NUCLEAR-PLASMA BLAST SPHERE
+            const innerCore = new THREE.Mesh(createSculptedArmorDomeGeo(0.32, 14, 14), SHARED_FX_MAT.projTankTip);
+            const outerShell = new THREE.Mesh(createSculptedArmorDomeGeo(0.48, 14, 14), SHARED_FX_MAT.projMortar);
+            const ringA = new THREE.Mesh(createSculptedTorusCollarGeo(0.56, 0.045, 8, 16), MAT.amberGlow);
+            const ringB = ringA.clone();
+            ringB.rotation.x = Math.PI / 2;
+            root.add(innerCore, outerShell, ringA, ringB);
+            if (window.THRUST_FX_SYSTEM) {
+                const tail = window.THRUST_FX_SYSTEM.createThrusterAssembly({
+                    coreColor: 0xffea80,
+                    glowColor: 0xff3b00,
+                    radius: 0.34,
+                    length: 1.35,
+                    scrollSpeed: 8.5
+                });
+                tail.position.z = -0.25;
+                root.add(tail);
+            }
+        } else if (pType === 'battlecruiser_laser' || pType === 'laser') {
+            // TERRAN BROADSIDE LASER BATTERY BOLT
+            const beamCore = new THREE.Mesh(createSculptedLatheBarrelGeo(0.036, 0.036, 0.92, 8), SHARED_FX_MAT.projTankTip);
+            beamCore.rotation.x = Math.PI / 2;
+            const plasmaSheath = new THREE.Mesh(createSculptedLatheBarrelGeo(0.075, 0.055, 0.84, 8), SHARED_FX_MAT.projRocket);
+            plasmaSheath.rotation.x = Math.PI / 2;
+            const collar = new THREE.Mesh(createSculptedTorusCollarGeo(0.085, 0.018, 6, 10), MAT.amberGlow);
+            collar.position.z = 0.24;
+            root.add(beamCore, plasmaSheath, collar);
+        } else if (pType === 'acid' || pType === 'bile' || pType === 'glaive' || pType === 'spine') {
+            // ZERG VISCOELASTIC BIO-ACID GLOBULE & SERRATED CHITIN SPINE
+            const bioCore = new THREE.Mesh(SHARED_FX_GEO.acidProj, SHARED_FX_MAT.projAcid);
+            const chitinSpike = new THREE.Mesh(createSculptedOgiveSpireGeo(0.07, 0.38, 7), MAT.zergChitin || MAT.fleshTendon);
+            chitinSpike.rotation.x = -Math.PI / 2;
+            chitinSpike.position.z = -0.14;
+            const lobeA = new THREE.Mesh(createOrganicBioCarapaceGeo(0.075, 0.075, 0.14, 5, 0.02), SHARED_FX_MAT.projAcid);
+            lobeA.position.set(0.07, 0.04, -0.05);
+            const lobeB = lobeA.clone();
+            lobeB.position.set(-0.07, -0.04, -0.06);
+            root.add(bioCore, chitinSpike, lobeA, lobeB);
+        } else if (pType === 'solaris' || pType === 'sunlance' || pType === 'phase_orb') {
+            // SOLARIS FACETED CRYSTALLINE PRISM LANCE & HARMONIC ENERGY HALO
+            const crystal = new THREE.Mesh(createSculptedFacetedCrystalGeo(0.14, 1), MAT.plasmaShader || MAT.cyanGlow);
+            crystal.scale.set(0.75, 0.75, 2.1);
+            const goldCollar = new THREE.Mesh(createSculptedTorusCollarGeo(0.13, 0.024, 6, 12), MAT.protossGold);
+            goldCollar.position.z = -0.06;
+            const goldFin = new THREE.Mesh(createExtrudedArmorHullGeo(0.26, 0.02, 0.22), MAT.protossGold);
+            goldFin.position.z = -0.16;
+            root.add(crystal, goldCollar, goldFin);
+        } else if (pType === 'mortar') {
+            // HEAVY INCENDIARY ARTILLERY SHELL
+            const shell = new THREE.Mesh(SHARED_FX_GEO.mortarProj, SHARED_FX_MAT.projMortar);
+            const band = new THREE.Mesh(createSculptedTorusCollarGeo(0.095, 0.02, 6, 10), MAT.darkSteel);
+            band.position.z = -0.06;
+            root.add(shell, band);
+        } else {
+            // HIGH-VELOCITY GAUSS / TRACER PROJECTILE
+            const core = new THREE.Mesh(SHARED_FX_GEO.bulletProj, SHARED_FX_MAT.projBullet);
+            const jacket = new THREE.Mesh(createSculptedOgiveSpireGeo(0.032, 0.22, 8), MAT.amberGlow);
+            jacket.rotation.x = Math.PI / 2;
+            jacket.position.z = 0.08;
+            root.add(core, jacket);
+        }
+
+        return root;
+    }
+};
+window.PROJECTILE_VISUAL_FACTORY = PROJECTILE_VISUAL_FACTORY;

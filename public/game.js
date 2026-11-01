@@ -860,7 +860,11 @@ function updateFogOfWarVision() {
         const totalCells = FOW_RES * FOW_RES;
         for (let idx = 0; idx < totalCells; idx++) {
             const minRatioSq = _fowMinRatioSqGrid[idx];
-            let targetAlpha = 195;
+            // 3 Explicit FOW States:
+            // - Visible (alpha 0..90): Active player vision
+            // - Explored (alpha 132): Previously seen terrain/static props darkened (~40% brightness)
+            // - Unexplored (alpha 235): Deep shroud (~13% brightness)
+            let targetAlpha = 235;
             if (minRatioSq < 1.0) {
                 fowExplored[idx] = 1;
                 fowVisible[idx] = 1;
@@ -869,10 +873,10 @@ function updateFogOfWarVision() {
                 } else {
                     const minRatio = Math.sqrt(minRatioSq);
                     const edgeT = (minRatio - 0.64) / 0.36;
-                    targetAlpha = Math.floor(edgeT * edgeT * (3.0 - 2.0 * edgeT) * 96);
+                    targetAlpha = Math.floor(edgeT * edgeT * (3.0 - 2.0 * edgeT) * 124);
                 }
             } else if (fowExplored[idx]) {
-                targetAlpha = 96;
+                targetAlpha = 132;
             }
 
             const prevSmooth = fowSmoothAlpha[idx];
@@ -882,9 +886,9 @@ function updateFogOfWarVision() {
             const alpha = Math.max(0, Math.min(255, (nextSmooth + 0.5) | 0));
 
             const p = idx * 4;
-            data[p] = 14;
-            data[p + 1] = 22;
-            data[p + 2] = 34;
+            data[p] = 10;
+            data[p + 1] = 16;
+            data[p + 2] = 26;
             data[p + 3] = alpha;
         }
 
@@ -905,11 +909,11 @@ function updateFogOfWarVision() {
 
     for (let i = 0; i < enemyBuildings.length; i++) {
         const eb = enemyBuildings[i];
-        const exp = fowBypass || isWorldPosExplored(eb.pos.x, eb.pos.z);
         const vis = fowBypass || isWorldPosVisible(eb.pos.x, eb.pos.z);
-        eb.mesh.visible = exp;
+        // Enemy structures must ONLY be visible when inside current player vision (disappear immediately in Explored & Unexplored fog)
+        eb.mesh.visible = vis;
         if (eb.expCreepMesh) {
-            eb.expCreepMesh.visible = exp && (typeof creepRadius === 'undefined' || creepRadius > 0.45);
+            eb.expCreepMesh.visible = vis && (typeof creepRadius === 'undefined' || creepRadius > 0.45);
         }
         if (vis && state.basePlaced && !state.enemyBaseDiscovered) {
             notifyEnemyBaseDiscovered(eb.pos);
@@ -922,21 +926,22 @@ function updateFogOfWarVision() {
 
     if (typeof activeZergMainCreepMesh !== 'undefined' && activeZergMainCreepMesh) {
         const r = typeof creepRadius !== 'undefined' ? creepRadius : 16.5;
-        const hiveExplored = fowBypass
-            || isWorldPosExplored(ENEMY_BASE_POS.x, ENEMY_BASE_POS.z)
-            || isWorldPosExplored(ENEMY_BASE_POS.x + r * 0.55, ENEMY_BASE_POS.z)
-            || isWorldPosExplored(ENEMY_BASE_POS.x - r * 0.55, ENEMY_BASE_POS.z)
-            || isWorldPosExplored(ENEMY_BASE_POS.x, ENEMY_BASE_POS.z + r * 0.55)
-            || isWorldPosExplored(ENEMY_BASE_POS.x, ENEMY_BASE_POS.z - r * 0.55);
-        activeZergMainCreepMesh.visible = (r > 0.45) && hiveExplored;
+        const hiveVisible = fowBypass
+            || isWorldPosVisible(ENEMY_BASE_POS.x, ENEMY_BASE_POS.z)
+            || isWorldPosVisible(ENEMY_BASE_POS.x + r * 0.55, ENEMY_BASE_POS.z)
+            || isWorldPosVisible(ENEMY_BASE_POS.x - r * 0.55, ENEMY_BASE_POS.z)
+            || isWorldPosVisible(ENEMY_BASE_POS.x, ENEMY_BASE_POS.z + r * 0.55)
+            || isWorldPosVisible(ENEMY_BASE_POS.x, ENEMY_BASE_POS.z - r * 0.55);
+        activeZergMainCreepMesh.visible = (r > 0.45) && hiveVisible;
     }
 
     if (typeof creepTumors !== 'undefined' && Array.isArray(creepTumors)) {
         for (let t = 0; t < creepTumors.length; t++) {
             const ct = creepTumors[t];
             if (ct && ct.group) {
-                ct.group.visible = !ct.dead && (fowBypass || isWorldPosExplored(ct.x, ct.z));
-                if (ct.pustule) ct.pustule.visible = fowBypass || isWorldPosVisible(ct.x, ct.z);
+                const ctVis = fowBypass || isWorldPosVisible(ct.x, ct.z);
+                ct.group.visible = !ct.dead && ctVis;
+                if (ct.pustule) ct.pustule.visible = !ct.dead && ctVis;
             }
         }
     }
@@ -946,7 +951,7 @@ function updateFogOfWarVision() {
             const fi = frontierBuildingInfestations[f];
             if (fi && fi.group) {
                 const onCreep = typeof isPointOnZergCreep === 'function' ? isPointOnZergCreep(fi.x, fi.z) : true;
-                fi.group.visible = onCreep && (fowBypass || isWorldPosExplored(fi.x, fi.z));
+                fi.group.visible = onCreep && (fowBypass || isWorldPosVisible(fi.x, fi.z));
             }
         }
     }
@@ -1090,6 +1095,7 @@ function initEnemyHiveCluster() {
     }
     const citadelMesh = createLeviathanCitadel();
     citadelMesh.position.copy(ENEMY_BASE_POS);
+    citadelMesh.visible = false;
     scene.add(citadelMesh);
     const cBadge = document.createElement('div');
     cBadge.style.display = 'none';
@@ -2845,16 +2851,18 @@ function renderSC2CommandCard() {
                     { key: 'Y', u: 'valkyrie',   name: 'Valkyrie Mech', tag: 'AERO-MECH',  locked: false, desc: 'Valkyrie Transformable Semi-Mech [Y]: Switches between Flight Interceptor and Ground Walker.' }
                   ]
                 : [
-                    { key: 'Q', u: 'tank',       name: 'Tank',          tag: 'MECH GND',   locked: false, desc: 'M80 Grizzly Tank [Q]: Heavy Chobham armor & 120mm APFSDS ground-only battle cannon.' },
-                    { key: 'W', u: 'heli',       name: 'Gunship Heli',  tag: 'MECH AIR',   locked: false, desc: 'AH-99 Hunter Gunship [W]: Fast attack helicopter with 360° under-belly minigun turret & Hydra rockets.' },
-                    { key: 'E', u: 'transport',  name: 'Dropship APC',  tag: hasBarracksBuilt ? 'DROP APC' : 'NEED BARRACKS', locked: !hasBarracksBuilt, desc: 'Hercules Dropship APC [E]: VTOL carrier that air-drops infantry squads near enemy territory (Requires Barracks).' },
-                    { key: 'R', u: 'valkyrie',   name: 'Valkyrie Mech', tag: 'AERO-MECH',  locked: false, desc: 'Valkyrie Transformable Semi-Mech [R]: Flies to intercept Air enemies with Halo Missiles; unfolds Walker Legs to engage Ground units!' },
-                    { key: 'T', u: 'siege_tank', name: 'Siege Tank',    tag: 'AUTO-SIEGE', locked: false, desc: 'Crucio Siege Tank [T]: Heavy tank with rotating turret head & auto-siege hydraulic outriggers that transform into 28.5m long-range artillery!' }
+                    { key: 'Q', u: 'tank',          name: 'Tank',          tag: 'MECH GND',   locked: false, desc: 'M80 Grizzly Tank [Q]: Heavy Chobham armor & 120mm APFSDS ground-only battle cannon.' },
+                    { key: 'W', u: 'heli',          name: 'Gunship Heli',  tag: 'MECH AIR',   locked: false, desc: 'AH-99 Hunter Gunship [W]: Redesigned military attack helicopter with 360° rotary cannon & Hydra missile pods.' },
+                    { key: 'E', u: 'transport',     name: 'Dropship APC',  tag: hasBarracksBuilt ? 'DROP APC' : 'NEED BARRACKS', locked: !hasBarracksBuilt, desc: 'Hercules Dropship APC [E]: VTOL carrier that air-drops infantry squads near enemy territory (Requires Barracks).' },
+                    { key: 'R', u: 'valkyrie',      name: 'Valkyrie Mech', tag: 'AERO-MECH',  locked: false, desc: 'Valkyrie Transformable Semi-Mech [R]: Flies to intercept Air enemies with Halo Missiles; unfolds Walker Legs to engage Ground units!' },
+                    { key: 'T', u: 'siege_tank',    name: 'Siege Tank',    tag: 'AUTO-SIEGE', locked: false, desc: 'Crucio Siege Tank [T]: Heavy tank with rotating turret head & auto-siege hydraulic outriggers that transform into 28.5m long-range artillery!' },
+                    { key: 'Y', u: 'medivac',       name: 'Medivac Ship',  tag: 'AIR HEAL',   locked: false, desc: 'Terran Medivac Dropship [Y]: Medical support aircraft with twin tilt-engines and Caduceus healing beam that autonomously heals biological allies!' },
+                    { key: 'U', u: 'battlecruiser', name: 'Battlecruiser', tag: 'CAPITAL SHIP', locked: false, desc: 'Minotaur-Class Battlecruiser [U]: Heavy Terran capital ship armed with broadside laser turret batteries and a forward Yamato Cannon!' }
                   ]);
 
         const spawnTimes = {
             grunt: 9.0, ranger: 10.0, medic: 10.5, rocketman: 11.5, reaper: 10.0, firebat: 11.0, marauder: 12.5,
-            tank: 15.5, siege_tank: 18.0, heli: 14.0, transport: 14.0, valkyrie: 16.5,
+            tank: 15.5, siege_tank: 18.0, heli: 14.0, transport: 14.0, medivac: 13.5, battlecruiser: 22.0, valkyrie: 16.5,
             phoenix: 12.0, void_ray: 16.0, carrier: 20.0, stalker: 12.0
         };
 
@@ -3804,31 +3812,37 @@ function renderTacticalMinimap() {
     minimapCtx.moveTo(0, h * 0.5); minimapCtx.lineTo(w, h * 0.5);
     minimapCtx.stroke();
 
-    // Zerg Creep Zone Overlay on Tactical Minimap (Organic Pulsing Violet-Purple Zone)
+    // Zerg Creep Zone Overlay on Tactical Minimap (Only shown when Hive area is currently visible or FOW reveal is active)
+    const minimapFowBypass = !!(window.titleScreenActive || window.loadingCameraSweep || window.fowRevealAll);
     if (typeof creepRadius !== 'undefined' && creepRadius > 0.5 && typeof ENEMY_BASE_POS !== 'undefined') {
-        const cx = ((ENEMY_BASE_POS.x / MAP_SIZE) + 0.5) * w;
-        const cy = ((ENEMY_BASE_POS.z / MAP_SIZE) + 0.5) * h;
-        const cr = (creepRadius / MAP_SIZE) * w;
-        const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.004);
-        const grad = minimapCtx.createRadialGradient(cx, cy, cr * 0.1, cx, cy, cr);
-        grad.addColorStop(0, `rgba(168, 85, 247, ${0.42 + pulse * 0.14})`);
-        grad.addColorStop(0.7, `rgba(126, 34, 206, ${0.28 + pulse * 0.10})`);
-        grad.addColorStop(1, 'rgba(88, 28, 135, 0)');
-        minimapCtx.fillStyle = grad;
-        minimapCtx.beginPath();
-        minimapCtx.arc(cx, cy, cr, 0, Math.PI * 2);
-        minimapCtx.fill();
+        const creepVis = minimapFowBypass || isWorldPosVisible(ENEMY_BASE_POS.x, ENEMY_BASE_POS.z);
+        if (creepVis) {
+            const cx = ((ENEMY_BASE_POS.x / MAP_SIZE) + 0.5) * w;
+            const cy = ((ENEMY_BASE_POS.z / MAP_SIZE) + 0.5) * h;
+            const cr = (creepRadius / MAP_SIZE) * w;
+            const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.004);
+            const grad = minimapCtx.createRadialGradient(cx, cy, cr * 0.1, cx, cy, cr);
+            grad.addColorStop(0, `rgba(168, 85, 247, ${0.42 + pulse * 0.14})`);
+            grad.addColorStop(0.7, `rgba(126, 34, 206, ${0.28 + pulse * 0.10})`);
+            grad.addColorStop(1, 'rgba(88, 28, 135, 0)');
+            minimapCtx.fillStyle = grad;
+            minimapCtx.beginPath();
+            minimapCtx.arc(cx, cy, cr, 0, Math.PI * 2);
+            minimapCtx.fill();
 
-        minimapCtx.strokeStyle = `rgba(216, 180, 254, ${0.45 + pulse * 0.25})`;
-        minimapCtx.lineWidth = 1.2;
-        minimapCtx.beginPath();
-        minimapCtx.arc(cx, cy, cr * (0.92 + pulse * 0.06), 0, Math.PI * 2);
-        minimapCtx.stroke();
+            minimapCtx.strokeStyle = `rgba(216, 180, 254, ${0.45 + pulse * 0.25})`;
+            minimapCtx.lineWidth = 1.2;
+            minimapCtx.beginPath();
+            minimapCtx.arc(cx, cy, cr * (0.92 + pulse * 0.06), 0, Math.PI * 2);
+            minimapCtx.stroke();
+        }
     }
 
-    // Solaris Chrono-Synod Enclave Structures (Gold-Cyan Diamonds)
+    // Solaris Chrono-Synod Enclave Structures (Gold-Cyan Diamonds; respect FOW when hostile)
     solarisBuildings.forEach(sb => {
         if (!sb || sb.hp <= 0) return;
+        if (state.solarisHostile && !minimapFowBypass && !isWorldPosVisible(sb.pos.x, sb.pos.z)) return;
+        if (!state.solarisHostile && !minimapFowBypass && !isWorldPosExplored(sb.pos.x, sb.pos.z)) return;
         const mx = ((sb.pos.x / MAP_SIZE) + 0.5) * w;
         const my = ((sb.pos.z / MAP_SIZE) + 0.5) * h;
         minimapCtx.fillStyle = '#f5b932';
@@ -3869,7 +3883,10 @@ function renderTacticalMinimap() {
         minimapCtx.fillRect(mx - 1.75, my - 1.75, 3.5, 3.5);
     });
 
+    // Enemy structures ONLY appear on minimap when currently visible inside active player vision!
     enemyBuildings.forEach(eb => {
+        if (!eb || eb.hp <= 0) return;
+        if (!minimapFowBypass && !isWorldPosVisible(eb.pos.x, eb.pos.z)) return;
         const mx = ((eb.pos.x / MAP_SIZE) + 0.5) * w;
         const my = ((eb.pos.z / MAP_SIZE) + 0.5) * h;
         minimapCtx.fillStyle = '#9333ea';
@@ -5707,26 +5724,28 @@ function spawnAlliedUnit(uType, spawnOrigin) {
         firebat:   { hp: 265, dmg: 38, rng: 5.5,  spd: 4.1, rate: 0.48, rad: 0.54, col: '#ff5500' },
         marauder:  { hp: 315, dmg: 54, rng: 11.5, spd: 3.6, rate: 0.92, rad: 0.58, col: '#ffaa00' },
         hero:      { hp: 750, dmg: 48, rng: 10.5, spd: 4.5, rate: 0.24, rad: 0.65, col: '#ffaa00' },
-        tank:      { hp: 620, dmg: 90, rng: 15.0, spd: 2.9, rate: 2.00, rad: 1.15, col: '#00e5ff' },
-        siege_tank:{ hp: 680, dmg: 85, rng: 14.0, spd: 2.6, rate: 1.85, rad: 1.22, col: '#00e5ff' },
-        heli:      { hp: 360, dmg: 40, rng: 13.0, spd: 6.5, rate: 0.52, rad: 0.95, col: '#00e5ff' },
-        transport: { hp: 520, dmg: 0,  rng: 10.5, spd: 7.2, rate: 1.00, rad: 1.15, col: '#00ff66' },
-        valkyrie:  { hp: 440, dmg: 38, rng: 17.5, spd: 6.8, rate: 1.15, rad: 1.05, col: '#38bdf8' },
-        zealot:    { hp: 220, shd: 120, dmg: 44, rng: 1.95, spd: 5.2, rate: 0.42, rad: 0.54, col: '#f5b932' },
-        stalker:   { hp: 180, shd: 140, dmg: 38, rng: 13.5, spd: 4.6, rate: 0.72, rad: 0.72, col: '#38bdf8' },
-        archon:    { hp: 160, shd: 380, dmg: 68, rng: 9.5,  spd: 4.1, rate: 0.95, rad: 0.82, col: '#f5b932' },
-        phoenix:   { hp: 240, shd: 140, dmg: 34, rng: 14.0, spd: 8.2, rate: 0.44, rad: 0.88, col: '#38bdf8' },
-        void_ray:  { hp: 340, shd: 220, dmg: 26, rng: 15.5, spd: 5.2, rate: 0.25, rad: 1.05, col: '#00e5ff' },
-        carrier:   { hp: 520, shd: 360, dmg: 42, rng: 18.5, spd: 3.8, rate: 0.85, rad: 1.32, col: '#f5b932' }
+        tank:          { hp: 620, dmg: 90, rng: 15.0, spd: 2.9, rate: 2.00, rad: 1.15, col: '#00e5ff' },
+        siege_tank:    { hp: 680, dmg: 85, rng: 14.0, spd: 2.6, rate: 1.85, rad: 1.22, col: '#00e5ff' },
+        heli:          { hp: 380, dmg: 42, rng: 13.5, spd: 6.6, rate: 0.50, rad: 0.98, col: '#00e5ff' },
+        transport:     { hp: 520, dmg: 0,  rng: 10.5, spd: 7.2, rate: 1.00, rad: 1.15, col: '#00ff66' },
+        medivac:       { hp: 480, dmg: 0,  rng: 11.5, spd: 7.4, rate: 0.25, rad: 1.10, col: '#00ff66' },
+        battlecruiser: { hp: 1150, shd: 260, dmg: 68, rng: 18.5, spd: 4.2, rate: 0.52, rad: 1.48, col: '#38bdf8' },
+        valkyrie:      { hp: 440, dmg: 38, rng: 17.5, spd: 6.8, rate: 1.15, rad: 1.05, col: '#38bdf8' },
+        zealot:        { hp: 220, shd: 120, dmg: 44, rng: 1.95, spd: 5.2, rate: 0.42, rad: 0.54, col: '#f5b932' },
+        stalker:       { hp: 180, shd: 140, dmg: 38, rng: 13.5, spd: 4.6, rate: 0.72, rad: 0.72, col: '#38bdf8' },
+        archon:        { hp: 160, shd: 380, dmg: 68, rng: 9.5,  spd: 4.1, rate: 0.95, rad: 0.82, col: '#f5b932' },
+        phoenix:       { hp: 240, shd: 140, dmg: 34, rng: 14.0, spd: 8.2, rate: 0.44, rad: 0.88, col: '#38bdf8' },
+        void_ray:      { hp: 340, shd: 220, dmg: 26, rng: 15.5, spd: 5.2, rate: 0.25, rad: 1.05, col: '#00e5ff' },
+        carrier:       { hp: 520, shd: 360, dmg: 42, rng: 18.5, spd: 3.8, rate: 0.85, rad: 1.32, col: '#f5b932' }
     };
     if (!uType || !statsMap[uType]) uType = 'ranger';
     const stats = statsMap[uType];
     if (!spawnOrigin) spawnOrigin = state.baseBuilding ? state.baseBuilding.pos : PLAYER_START_POS;
 
     const mesh = createAnimatedUnitModel(uType);
-    // Reaper is a flying jump-jet infantry unit; Heli, Transport, Valkyrie, Phoenix, Void Ray & Carrier are aircraft
-    const isAir = (uType === 'heli' || uType === 'transport' || uType === 'valkyrie' || uType === 'reaper' || uType === 'phoenix' || uType === 'void_ray' || uType === 'carrier');
-    const isMechanical = (uType === 'tank' || uType === 'siege_tank' || uType === 'stalker' || uType === 'heli' || uType === 'transport' || uType === 'valkyrie' || uType === 'phoenix' || uType === 'void_ray' || uType === 'carrier');
+    // Reaper is a flying jump-jet infantry unit; Heli, Transport, Medivac, Battlecruiser, Valkyrie, Phoenix, Void Ray & Carrier are aircraft
+    const isAir = (uType === 'heli' || uType === 'transport' || uType === 'medivac' || uType === 'battlecruiser' || uType === 'valkyrie' || uType === 'reaper' || uType === 'phoenix' || uType === 'void_ray' || uType === 'carrier');
+    const isMechanical = (uType === 'tank' || uType === 'siege_tank' || uType === 'stalker' || uType === 'heli' || uType === 'transport' || uType === 'medivac' || uType === 'battlecruiser' || uType === 'valkyrie' || uType === 'phoenix' || uType === 'void_ray' || uType === 'carrier');
     const isBiological = !isMechanical;
 
     // Use Clear Spawn Point Finder so ground units NEVER spawn wedged inside tight building gaps!
@@ -5741,7 +5760,7 @@ function spawnAlliedUnit(uType, spawnOrigin) {
     }
 
     const baseH = getTerrainHeight(sx, sz);
-    const initAirAlt = uType === 'reaper' ? 2.65 : 6.2;
+    const initAirAlt = uType === 'reaper' ? 2.65 : (uType === 'battlecruiser' ? 7.6 : 6.2);
     mesh.position.set(sx, isAir ? Math.max(0, baseH) + initAirAlt : baseH, sz);
 
     // Initial smooth yaw facing outward from spawn building
@@ -5760,7 +5779,7 @@ function spawnAlliedUnit(uType, spawnOrigin) {
 
     const hb = makeHealthPip(stats.col);
     let healBeam = null;
-    if (uType === 'medic') {
+    if (uType === 'medic' || uType === 'medivac') {
         healBeam = new THREE.Mesh(healBeamGeo, MAT.medicBioBeam);
         healBeam.visible = false;
         scene.add(healBeam);
@@ -8063,12 +8082,12 @@ function recordRagdollHitImpulse(victim, originPos, isHeavy = false) {
     victim.lastHitHeavy = isHeavy;
 }
 
-// Non-Homing Ballistic Projectile Launcher: locks onto the exact landing coordinates at fire time!
-function launchOrdProjectile(startPos, targetObj, wType, damage, isEnemyAcid = false) {
+// Non-Homing & Guided Ballistic Projectile Launcher with Faction-Specific 3D Visuals
+function launchOrdProjectile(startPos, targetObj, wType, damage, isEnemyAcid = false, customOpts = null) {
     if (window.SFX) window.SFX.playShoot(wType);
-    if (projectiles.length >= 65) {
+    if (projectiles.length >= 80) {
         const old = projectiles.shift();
-        scene.remove(old.mesh);
+        if (old && old.mesh) scene.remove(old.mesh);
     }
     const isTankRound = (wType === 'tank' || wType === 'siege_tank');
     const isMortar = (wType === 'mortar' || wType === 'behemoth');
@@ -8079,44 +8098,36 @@ function launchOrdProjectile(startPos, targetObj, wType, damage, isEnemyAcid = f
     const isValkMech = (wType === 'valk_mech');
     const isValkAA = (wType === 'valk_aa');
     const isMarauder = (wType === 'marauder');
-    const isRocket = (wType === 'rocket' || wType === 'heli' || wType === 'rocketman' || wType === 'valkyrie' || isValkAA || isMarauder);
+    const isYamato = (wType === 'yamato');
+    const isBcLaser = (wType === 'battlecruiser_laser' || wType === 'battlecruiser');
+    const isRocket = (wType === 'rocket' || wType === 'heli_rocket' || wType === 'rocketman' || wType === 'valkyrie' || isValkAA || isMarauder);
     const isZergGoo = isEnemyAcid || wType === 'spitter' || wType === 'mutalisk' || wType === 'behemoth' || wType === 'gorgon' || wType === 'spine';
 
     let mesh;
     if (isZergGoo && typeof createAlgorithmicBioGooProjectile === 'function') {
-        // Algorithmic Viscoelastic Zerg Spit / Goo / Jelly Cluster (Zero basic shapes!)
         mesh = createAlgorithmicBioGooProjectile(wType);
     } else if (isTankRound && typeof createTankCannonShellMesh === 'function') {
         mesh = createTankCannonShellMesh(wType === 'siege_tank');
+    } else if (window.PROJECTILE_VISUAL_FACTORY && (isRocket || isYamato || isBcLaser || isSunlance || isMortar || isSniper || wType === 'heli' || wType === 'ranger' || wType === 'reaper')) {
+        const pKind = isYamato ? 'yamato' : (isBcLaser ? 'battlecruiser_laser' : (isRocket ? 'missile' : (isSunlance ? 'sunlance' : (isMortar ? 'mortar' : 'bullet'))));
+        mesh = window.PROJECTILE_VISUAL_FACTORY.createProjectileVisual(pKind);
+        if (isRocket) mesh.userData.hasRocketThruster = true;
     } else if (isSolarisBeam) {
-        // Realistic Protoss Solaris Phase-Disruptor / Psionic Shock-Orb, Khaydarin Prismatic Lance & Phoenix/Interceptor Ion Pulse
         mesh = new THREE.Group();
         mesh.userData.isSolarisProj = true;
         const eggGeoFn = typeof window.createSculptedEggSacGeo === 'function'
             ? window.createSculptedEggSacGeo
             : (rx, ry, segs) => createSculptedArmorDomeGeo(rx, segs || 10, segs || 10);
         if (wType === 'archon') {
-            const coreOrb = new THREE.Mesh(
-                eggGeoFn(0.14, 0.16, 12),
-                MAT.solarisPrismGlow || MAT.cyanGlow
-            );
-            const outerShell = new THREE.Mesh(
-                eggGeoFn(0.22, 0.24, 12),
-                MAT.solarisGold || MAT.amberGlow
-            );
-            const ring1 = new THREE.Mesh(
-                createSculptedTorusCollarGeo(0.26, 0.024, 8, 18),
-                MAT.solarisPrismGlow || MAT.cyanGlow
-            );
-            const ring2 = new THREE.Mesh(
-                createSculptedTorusCollarGeo(0.22, 0.020, 8, 18),
-                MAT.solarisGold || MAT.amberGlow
-            );
+            const coreOrb = new THREE.Mesh(eggGeoFn(0.14, 0.16, 12), MAT.solarisPrismGlow || MAT.cyanGlow);
+            const outerShell = new THREE.Mesh(eggGeoFn(0.22, 0.24, 12), MAT.solarisGold || MAT.amberGlow);
+            const ring1 = new THREE.Mesh(createSculptedTorusCollarGeo(0.26, 0.024, 8, 18), MAT.solarisPrismGlow || MAT.cyanGlow);
+            const ring2 = new THREE.Mesh(createSculptedTorusCollarGeo(0.22, 0.020, 8, 18), MAT.solarisGold || MAT.amberGlow);
             ring2.rotation.x = Math.PI / 2;
             mesh.add(coreOrb, outerShell, ring1, ring2);
             mesh.userData.gyroRing1 = ring1;
             mesh.userData.gyroRing2 = ring2;
-        } else if (wType === 'stalker' || wType === 'phoenix' || wType === 'interceptor') {
+        } else {
             const isSmallIon = (wType === 'interceptor');
             const lanceCore = new THREE.Mesh(
                 createSculptedLatheBarrelGeo(isSmallIon ? 0.022 : 0.032, isSmallIon ? 0.034 : 0.048, isSmallIon ? 0.42 : 0.64, 10).rotateX(Math.PI / 2),
@@ -8134,64 +8145,13 @@ function launchOrdProjectile(startPos, targetObj, wType, damage, isEnemyAcid = f
             warpCollar.position.z = 0.04;
             mesh.add(lanceCore, tipCrystal, warpCollar);
             mesh.userData.gyroRing1 = warpCollar;
-        } else {
-            // Khaydarin Aegis Spire Prismatic Solar-Lance: Focusing Khaydarin prism orb + high-energy golden-cyan photon spear
-            const photonCore = new THREE.Mesh(
-                eggGeoFn(0.12, 0.32, 10).rotateX(Math.PI / 2),
-                MAT.solarisPrismGlow || MAT.cyanGlow
-            );
-            const solarCrown = new THREE.Mesh(
-                createSculptedTorusCollarGeo(0.15, 0.024, 8, 16),
-                MAT.solarisGold || MAT.amberGlow
-            );
-            mesh.add(photonCore, solarCrown);
-            mesh.userData.gyroRing1 = solarCrown;
         }
-    } else if (isSunlance) {
-        mesh = new THREE.Group();
-        const spearCore = new THREE.Mesh(
-            createSculptedLatheBarrelGeo(0.045, 0.045, 0.72, 10).rotateX(Math.PI / 2),
-            MAT.cyanGlow
-        );
-        const goldenSheath = new THREE.Mesh(
-            createSculptedLatheBarrelGeo(0.085, 0.025, 0.52, 10).rotateX(Math.PI / 2),
-            MAT.amberGlow
-        );
-        const haloRing = new THREE.Mesh(
-            createSculptedTorusCollarGeo(0.13, 0.024, 8, 16),
-            MAT.amberGlow
-        );
-        haloRing.position.z = 0.10;
-        mesh.add(spearCore, goldenSheath, haloRing);
-    } else if (isValkMech) {
-        mesh = new THREE.Group();
-        const shellBody = new THREE.Mesh(
-            createSculptedLatheBarrelGeo(0.042, 0.052, 0.36, 10).rotateX(Math.PI / 2),
-            MAT.amberGlow
-        );
-        const tip = new THREE.Mesh(
-            createSculptedOgiveSpireGeo(0.052, 0.14, 10).rotateX(Math.PI / 2),
-            MAT.cyanGlow
-        );
-        tip.position.z = 0.22;
-        mesh.add(shellBody, tip);
-    } else if (isRocket) {
-        mesh = new THREE.Group();
-        const body = new THREE.Mesh(createSculptedLatheBarrelGeo(0.045, 0.055, 0.42, 10).rotateX(Math.PI / 2), MAT.titanium);
-        const cone = new THREE.Mesh(createSculptedOgiveSpireGeo(0.055, 0.16, 10).rotateX(Math.PI / 2), SHARED_FX_MAT.projRocket || MAT.crimson);
-        cone.position.z = 0.26;
-        const nozzleRim = new THREE.Mesh(createSculptedTorusCollarGeo(0.044, 0.012, 6, 10), MAT.gunmetal);
-        nozzleRim.position.z = -0.21;
-        mesh.add(body, cone, nozzleRim);
-        mesh.userData.hasRocketThruster = true;
+    } else if (window.PROJECTILE_VISUAL_FACTORY) {
+        mesh = window.PROJECTILE_VISUAL_FACTORY.createProjectileVisual(isPlasma ? 'solaris' : 'bullet');
     } else {
-        const geo = isMortar
-            ? SHARED_FX_GEO.mortarProj
-            : (isPlasma ? SHARED_FX_GEO.acidProj : SHARED_FX_GEO.bulletProj);
-        const mat = isPlasma ? MAT.cyanGlow : (isSniper ? MAT.healGlow : (isMortar ? SHARED_FX_MAT.projMortar : SHARED_FX_MAT.projBullet));
-        mesh = new THREE.Mesh(geo, mat);
-        if (isPlasma) mesh.scale.setScalar(1.35);
-        if (isSniper) mesh.scale.set(0.8, 0.8, 2.4);
+        mesh = new THREE.Group();
+        const core = new THREE.Mesh(SHARED_FX_GEO.bulletProj, SHARED_FX_MAT.projBullet);
+        mesh.add(core);
     }
 
     const safeStartX = Number.isFinite(startPos.x) ? startPos.x : PLAYER_START_POS.x;
@@ -8203,14 +8163,16 @@ function launchOrdProjectile(startPos, targetObj, wType, damage, isEnemyAcid = f
 
     const rawTargetPos = (targetObj && (targetObj.mesh ? targetObj.mesh.position : targetObj.pos)) || validStart;
     const isAirTarget = !!(targetObj && targetObj.isAir);
-    const safeTargetX = Number.isFinite(rawTargetPos.x) ? rawTargetPos.x : safeStartX + 1.0;
-    const safeTargetZ = Number.isFinite(rawTargetPos.z) ? rawTargetPos.z : safeStartZ + 1.0;
+    const offsetX = (customOpts && Number.isFinite(customOpts.offsetX)) ? customOpts.offsetX : 0;
+    const offsetZ = (customOpts && Number.isFinite(customOpts.offsetZ)) ? customOpts.offsetZ : 0;
+    const safeTargetX = (Number.isFinite(rawTargetPos.x) ? rawTargetPos.x : safeStartX + 1.0) + offsetX;
+    const safeTargetZ = (Number.isFinite(rawTargetPos.z) ? rawTargetPos.z : safeStartZ + 1.0) + offsetZ;
     const impactY = isAirTarget && Number.isFinite(rawTargetPos.y)
         ? rawTargetPos.y
         : (getTerrainHeight(safeTargetX, safeTargetZ) + 0.42);
     const landingPos = new THREE.Vector3(safeTargetX, impactY, safeTargetZ);
     const totalDist = Math.max(1.2, validStart.distanceTo(landingPos));
-    const worldSpeed = isSniper ? 42.0 : (isSunlance ? 32.0 : (isValkMech ? 26.0 : (isTankRound ? (wType === 'siege_tank' ? 24.0 : 28.0) : (isRocket ? 24.0 : (isPlasma ? 24.0 : (isMortar ? 14.5 : (isZergGoo ? 19.5 : 28.0)))))));
+    const worldSpeed = isSniper ? 42.0 : (isBcLaser ? 36.0 : (isYamato ? 22.0 : (isSunlance ? 32.0 : (isValkMech ? 26.0 : (isTankRound ? (wType === 'siege_tank' ? 24.0 : 28.0) : (isRocket ? 22.5 : (isPlasma ? 24.0 : (isMortar ? 14.5 : (isZergGoo ? 19.5 : 28.0)))))))));
     const normalizedRate = Math.max(0.65, Math.min(8.5, worldSpeed / totalDist));
 
     projectiles.push({
@@ -8222,6 +8184,9 @@ function launchOrdProjectile(startPos, targetObj, wType, damage, isEnemyAcid = f
         targetObj,
         isAirTarget,
         wType, damage,
+        arcHeight: (customOpts && customOpts.arcHeight) ? customOpts.arcHeight : (isRocket ? 2.35 : 0),
+        lateralCurve: (customOpts && customOpts.lateralCurve) ? customOpts.lateralCurve : 0,
+        impactOffset: (customOpts && customOpts.impactOffset) ? customOpts.impactOffset : null,
         progress: 0,
         age: 0,
         maxAge: 5.0,
@@ -8229,6 +8194,105 @@ function launchOrdProjectile(startPos, targetObj, wType, damage, isEnemyAcid = f
         speed: normalizedRate
     });
 }
+
+// ============================================================================
+// STAGGERED ROCKETPAD MISSILE BARRAGE SYSTEM
+// Launches 4-6 finned missiles sequentially (0.07s apart) from individual
+// launch tube muzzles with backblast smoke, upward climb, and curved guidance
+// into a configurable target impact radius (default 2.6m).
+// ============================================================================
+const ACTIVE_MISSILE_BARRAGES = [];
+window.ACTIVE_MISSILE_BARRAGES = ACTIVE_MISSILE_BARRAGES;
+window.ROCKETPAD_BARRAGE_CONFIG = {
+    defaultMissileCount: 5,
+    staggerIntervalSec: 0.07,
+    targetImpactRadius: 2.6
+};
+
+window.queueRocketpadMissileBarrage = function(launcherObj, targetObj, perMissileDmg = 32, missileCount = 5, impactRadius = 2.6) {
+    if (!launcherObj || !targetObj || targetObj.hp <= 0) return false;
+    const tPos = targetObj.mesh ? targetObj.mesh.position : targetObj.pos;
+    if (!tPos) return false;
+    // Never fire at unexplored or currently invisible targets
+    const fowBypass = !!(window.titleScreenActive || window.loadingCameraSweep || window.fowRevealAll);
+    if (!fowBypass && typeof isWorldPosVisible === 'function' && !isWorldPosVisible(tPos.x, tPos.z)) {
+        return false;
+    }
+
+    const count = Math.max(4, Math.min(6, missileCount || window.ROCKETPAD_BARRAGE_CONFIG.defaultMissileCount));
+    const rad = Math.max(1.2, impactRadius || window.ROCKETPAD_BARRAGE_CONFIG.targetImpactRadius);
+    const shots = [];
+    for (let i = 0; i < count; i++) {
+        // Golden-angle spiral distribution inside impactRadius so missiles never all hit the exact same point
+        const ang = i * 2.39996 + (Math.random() - 0.5) * 0.45;
+        const dist = rad * (0.28 + 0.72 * Math.sqrt((i + 0.5) / count));
+        shots.push({
+            tubeIndex: i % 6,
+            delay: i * window.ROCKETPAD_BARRAGE_CONFIG.staggerIntervalSec,
+            offsetX: Math.cos(ang) * dist,
+            offsetZ: Math.sin(ang) * dist,
+            arcHeight: 2.6 + (i % 3) * 0.55 + Math.random() * 0.4,
+            lateralCurve: ((i % 2 === 0 ? 1 : -1) * (0.45 + (i * 0.18)))
+        });
+    }
+
+    const barrageRecord = {
+        launcherObj,
+        targetObj,
+        perMissileDmg,
+        impactRadius: rad,
+        elapsed: 0,
+        shots,
+        firedOffsets: shots.map(s => ({ offsetX: +s.offsetX.toFixed(2), offsetZ: +s.offsetZ.toFixed(2) }))
+    };
+    ACTIVE_MISSILE_BARRAGES.push(barrageRecord);
+    window.LAST_ROCKETPAD_BARRAGE = barrageRecord;
+    return true;
+};
+
+window.updateActiveMissileBarrages = function(dt) {
+    for (let b = ACTIVE_MISSILE_BARRAGES.length - 1; b >= 0; b--) {
+        const br = ACTIVE_MISSILE_BARRAGES[b];
+        if (!br || !br.shots || br.shots.length === 0) {
+            ACTIVE_MISSILE_BARRAGES.splice(b, 1);
+            continue;
+        }
+        br.elapsed += dt;
+        while (br.shots.length > 0 && br.elapsed >= br.shots[0].delay) {
+            const shot = br.shots.shift();
+            const target = br.targetObj;
+            if (!target || target.hp <= 0) continue;
+            const tPos = target.mesh ? target.mesh.position : target.pos;
+            const fowBypass = !!(window.titleScreenActive || window.loadingCameraSweep || window.fowRevealAll);
+            if (!fowBypass && tPos && typeof isWorldPosVisible === 'function' && !isWorldPosVisible(tPos.x, tPos.z)) {
+                continue;
+            }
+
+            const muzzleWorld = typeof window.getWeaponMuzzleWorldPos === 'function'
+                ? window.getWeaponMuzzleWorldPos(br.launcherObj, shot.tubeIndex)
+                : new THREE.Vector3(0, 1.5, 0);
+
+            triggerMuzzleFlash(muzzleWorld);
+            // Backblast smoke puff at rear of launcher pod
+            if (br.launcherObj && br.launcherObj.pod && br.launcherObj.pod.userData && br.launcherObj.pod.userData.backblastNode) {
+                const bbPos = br.launcherObj.pod.userData.backblastNode.getWorldPosition(new THREE.Vector3());
+                if (typeof emitThrusterExhaustParticles === 'function') {
+                    emitThrusterExhaustParticles(bbPos, new THREE.Vector3(0, 0.25, -1).normalize(), 'amber', 0.95, true);
+                }
+            }
+
+            launchOrdProjectile(muzzleWorld, target, 'rocket', br.perMissileDmg, false, {
+                offsetX: shot.offsetX,
+                offsetZ: shot.offsetZ,
+                arcHeight: shot.arcHeight,
+                lateralCurve: shot.lateralCurve
+            });
+        }
+        if (br.shots.length === 0) {
+            ACTIVE_MISSILE_BARRAGES.splice(b, 1);
+        }
+    }
+};
 
 // ============================================================================
 // 9. MAIN REAL-TIME SIMULATION LOOP & 10-STAGE LIVE 3D COMBAT CINEMATIC
@@ -9852,11 +9916,12 @@ function animate(now) {
             }
         }
         const sbInViewport = window.isWorldPosInViewport(sb.pos.x, sb.pos.y, sb.pos.z, 6.5);
-        sb.mesh.visible = sbInViewport;
-        if (sbInViewport) {
+        const sbFowVis = !state.solarisHostile || window.fowRevealAll || window.titleScreenActive || isWorldPosVisible(sb.pos.x, sb.pos.z);
+        sb.mesh.visible = sbInViewport && sbFowVis;
+        if (sb.mesh.visible) {
             updateBuildingMechanicsAndDamage(sb, dt);
         }
-        if (sbInViewport && isWorldPosVisible(sb.pos.x, sb.pos.z)) {
+        if (sb.mesh.visible && isWorldPosVisible(sb.pos.x, sb.pos.z)) {
             updateHealthPip(sb.hb, sb.hp, sb.maxHp, sb.shield || 0, sb.maxShield || 0);
             projectToScreen(sb.hb.root, sb.pos, sb.role === 'nexus' ? 3.2 : 2.2);
         } else if (sb.hb && sb.hb.root && sb.hb._lastDisp !== 'none') {
@@ -10535,12 +10600,8 @@ function animate(now) {
                             b.cooldowns[slot] = 0.72;
                         }
                         else if (w === 'rocket' && minDist <= 20.0 && b.cooldowns[slot] <= 0) {
-                            // Swarm Rocket Missile Pod: Fires twin ballistic high-explosive missiles!
-                            _muzzleScratch2.set(_muzzleScratch.x - 0.12, _muzzleScratch.y + 0.06, _muzzleScratch.z);
-                            launchOrdProjectile(_muzzleScratch2, nearest, 'rocket', 55);
-                            _muzzleScratch2.set(_muzzleScratch.x + 0.12, _muzzleScratch.y + 0.06, _muzzleScratch.z);
-                            launchOrdProjectile(_muzzleScratch2, nearest, 'rocket', 55);
-                            triggerMuzzleFlash(_muzzleScratch);
+                            // Staggered Multi-Tube Rocketpad Missile Barrage (5 missiles launched sequentially from tube muzzles into target radius)
+                            window.queueRocketpadMissileBarrage({ mesh: b.mesh, pod, pos: b.pos }, nearest, 34, 5, 2.6);
                             if (typeof window.spawnTurretMuzzleFlashFX === 'function') {
                                 window.spawnTurretMuzzleFlashFX(_muzzleScratch, aimDir, 'rocket');
                             }
@@ -10548,7 +10609,7 @@ function animate(now) {
                                 pod.position.z = basePodZ - 0.12;
                                 if (pod.userData.recoilGroup) pod.userData.recoilGroup.position.z = -0.18;
                             }
-                            b.cooldowns[slot] = 1.65;
+                            b.cooldowns[slot] = 1.85;
                         }
                         else if (w === 'sniper' && minDist <= 22.0 && b.cooldowns[slot] <= 0) {
                             launchOrdProjectile(_muzzleScratch, nearest, 'sniper', 125);
@@ -10927,6 +10988,105 @@ function animate(now) {
                     updateUnitAnimation(u.mesh, dt, moving, null);
                     updateHealthPip(u.hb, u.hp, u.maxHp, u.shield || 0, u.maxShield || 0);
                     projectToScreen(u.hb.root, u.mesh.position, 1.5, isSelectedUnit);
+                } else if (u.hb && u.hb.root && u.hb.root.style.display !== 'none') {
+                    u.hb.root.style.display = 'none';
+                }
+                return;
+            }
+
+            // --- TERRAN MEDIVAC MEDICAL SUPPORT DROPSHIP AI (Autonomous Biological Healing Beam) ---
+            if (u.type === 'medivac') {
+                const medivacAlt = 6.2;
+                if (u.order === 'move' && u.orderTarget) {
+                    const dMove = Math.hypot(u.orderTarget.x - u.mesh.position.x, u.orderTarget.z - u.mesh.position.z);
+                    if (dMove > 1.2) {
+                        const dxAir = u.orderTarget.x - u.mesh.position.x;
+                        const dzAir = u.orderTarget.z - u.mesh.position.z;
+                        const lenAir = Math.hypot(dxAir, dzAir) || 1;
+                        u.mesh.position.x += (dxAir / lenAir) * effSpeed * dt;
+                        u.mesh.position.z += (dzAir / lenAir) * effSpeed * dt;
+                        smoothAirVehicleTransform(u, u.orderTarget.x, u.orderTarget.z, medivacAlt, true, dt);
+                        moving = true;
+                        if (u.healBeam) u.healBeam.visible = false;
+                        if (inViewport) {
+                            updateUnitAnimation(u.mesh, dt, moving, null);
+                            updateHealthPip(u.hb, u.hp, u.maxHp, u.shield || 0, u.maxShield || 0);
+                            projectToScreen(u.hb.root, u.mesh.position, 1.85, isSelectedUnit);
+                        }
+                        return;
+                    } else {
+                        u.order = 'auto';
+                        u.orderTarget = null;
+                    }
+                }
+
+                let injuredBioAlly = null;
+                let bestScore = -Infinity;
+                let nearestBioAlly = null;
+                let minBioDist = Infinity;
+
+                for (let ai = 0; ai < units.length; ai++) {
+                    const ally = units[ai];
+                    if (!ally || ally === u || ally.hp <= 0 || !ally.isBiological || ally.isMechanical) continue;
+                    const d = Math.hypot(ally.mesh.position.x - u.mesh.position.x, ally.mesh.position.z - u.mesh.position.z);
+                    if (d < minBioDist) {
+                        minBioDist = d;
+                        nearestBioAlly = ally;
+                    }
+                    if (ally.hp < ally.maxHp) {
+                        const missingRatio = (ally.maxHp - ally.hp) / Math.max(1, ally.maxHp);
+                        const score = missingRatio * 140 - d * 1.25;
+                        if (score > bestScore) {
+                            bestScore = score;
+                            injuredBioAlly = ally;
+                        }
+                    }
+                }
+
+                const supportTarget = injuredBioAlly || nearestBioAlly;
+                if (supportTarget) {
+                    const tPos = supportTarget.mesh.position;
+                    const dist2D = Math.hypot(tPos.x - u.mesh.position.x, tPos.z - u.mesh.position.z);
+                    if (injuredBioAlly && dist2D <= u.range && injuredBioAlly.hp < injuredBioAlly.maxHp) {
+                        smoothAirVehicleTransform(u, tPos.x, tPos.z, medivacAlt, false, dt);
+                        injuredBioAlly.hp = Math.min(injuredBioAlly.maxHp, injuredBioAlly.hp + 36 * dt);
+                        if (u.healBeam) {
+                            window.getWeaponMuzzleWorldPos(u, 0, _beamStartScratch);
+                            _beamEndScratch.set(tPos.x, tPos.y + 0.75, tPos.z);
+                            const beamDist = _beamStartScratch.distanceTo(_beamEndScratch);
+                            const bioPulse = 0.90 + Math.sin(now * 0.018) * 0.35;
+                            u.healBeam.visible = true;
+                            u.healBeam.position.lerpVectors(_beamStartScratch, _beamEndScratch, 0.5);
+                            u.healBeam.scale.set(bioPulse, bioPulse, beamDist);
+                            u.healBeam.lookAt(_beamEndScratch);
+                        }
+                        if (u.cooldown <= 0) {
+                            spawnMedicBioPulseFX(tPos);
+                            spawnCombatFloat(tPos, '+CADUCEUS HEAL', '#00ff66');
+                            if (window.SFX) window.SFX.playHeal();
+                            u.cooldown = 0.80;
+                        }
+                    } else if (dist2D > 5.5 && u.order !== 'hold') {
+                        const dxAir = tPos.x - u.mesh.position.x;
+                        const dzAir = tPos.z - u.mesh.position.z;
+                        const lenAir = Math.hypot(dxAir, dzAir) || 1;
+                        u.mesh.position.x += (dxAir / lenAir) * effSpeed * dt;
+                        u.mesh.position.z += (dzAir / lenAir) * effSpeed * dt;
+                        smoothAirVehicleTransform(u, tPos.x, tPos.z, medivacAlt, true, dt);
+                        moving = true;
+                        if (u.healBeam) u.healBeam.visible = false;
+                    } else {
+                        smoothAirVehicleTransform(u, tPos.x, tPos.z, medivacAlt, false, dt);
+                        if (u.healBeam) u.healBeam.visible = false;
+                    }
+                } else {
+                    if (u.healBeam) u.healBeam.visible = false;
+                }
+
+                if (inViewport) {
+                    updateUnitAnimation(u.mesh, dt, moving, null);
+                    updateHealthPip(u.hb, u.hp, u.maxHp, u.shield || 0, u.maxShield || 0);
+                    projectToScreen(u.hb.root, u.mesh.position, 1.85, isSelectedUnit);
                 } else if (u.hb && u.hb.root && u.hb.root.style.display !== 'none') {
                     u.hb.root.style.display = 'none';
                 }
@@ -11581,16 +11741,34 @@ function animate(now) {
 
                     if (u.damage > 0 && u.cooldown <= 0 && u.type !== 'tank' && u.type !== 'siege_tank') {
                         u.mesh.userData.attackAnim = 1.0;
-                        let muzzle = _muzzleScratch.set(u.mesh.position.x, u.mesh.position.y + (u.isAir ? (u.type === 'reaper' ? 0.65 : -0.25) : 0.75), u.mesh.position.z);
-                        if (u.type === 'heli' && u.mesh.userData.bellyMuzzle) {
-                            muzzle = u.mesh.userData.bellyMuzzle.getWorldPosition(_muzzleScratch);
-                        } else if (u.type === 'hero' && u.mesh.userData.gunMuzzle) {
-                            muzzle = u.mesh.userData.gunMuzzle.getWorldPosition(_muzzleScratch);
-                        }
+                        u._shotBarrelIdx = ((u._shotBarrelIdx || 0) + 1) % 12;
+                        const muzzle = typeof window.getWeaponMuzzleWorldPos === 'function'
+                            ? window.getWeaponMuzzleWorldPos(u, u._shotBarrelIdx, _muzzleScratch)
+                            : _muzzleScratch.set(u.mesh.position.x, u.mesh.position.y + 0.75, u.mesh.position.z);
+
                         const isMeleeStrike = (u.type === 'grunt' || u.type === 'zealot' || u.type === 'skitterer' || u.type === 'crusher' || u.type === 'burster');
                         if (!isMeleeStrike && u.range > 2.35) {
                             if (u.type === 'void_ray' || u.type === 'carrier') {
                                 // Handled by dedicated Prismatic Beam & Autonomous Interceptor Squadron systems above
+                            } else if (u.type === 'battlecruiser') {
+                                u.yamatoShotCounter = ((u.yamatoShotCounter || 0) + 1) % 6;
+                                if (u.yamatoShotCounter === 0) {
+                                    const yamatoMuzzle = window.getWeaponMuzzleWorldPos(u, 99, _muzzleScratch2);
+                                    launchOrdProjectile(yamatoMuzzle, target, 'yamato', Math.round(u.damage * 2.65), false);
+                                    spawnCombatFloat(u.mesh.position, 'YAMATO CANNON!', '#ffaa00');
+                                } else {
+                                    const mLeft = window.getWeaponMuzzleWorldPos(u, u._shotBarrelIdx % 2, _muzzleScratch2);
+                                    launchOrdProjectile(mLeft, target, 'battlecruiser_laser', Math.round(u.damage * 0.65), false);
+                                    const mRight = window.getWeaponMuzzleWorldPos(u, 2 + (u._shotBarrelIdx % 2), _muzzleScratch2);
+                                    launchOrdProjectile(mRight, target, 'battlecruiser_laser', Math.round(u.damage * 0.65), false);
+                                }
+                            } else if (u.type === 'heli') {
+                                launchOrdProjectile(muzzle, target, 'heli', u.damage, false);
+                                if (u._shotBarrelIdx % 3 === 0) {
+                                    const podSlot = (u._shotBarrelIdx % 2 === 0) ? 1 : 2;
+                                    const podMuzzle = window.getWeaponMuzzleWorldPos(u, podSlot, _muzzleScratch2);
+                                    launchOrdProjectile(podMuzzle, target, 'rocket', Math.round(u.damage * 0.85), false);
+                                }
                             } else if (u.type === 'phoenix') {
                                 const rx = Math.cos(u.currentYaw || u.mesh.rotation.y || 0);
                                 const rz = -Math.sin(u.currentYaw || u.mesh.rotation.y || 0);
@@ -12710,7 +12888,11 @@ function animate(now) {
     if (perfProf) perfProf.end('corpsesAndDebris');
 
     if (perfProf) perfProf.begin('projectilesAndFX');
+    if (typeof window.updateActiveMissileBarrages === 'function') {
+        window.updateActiveMissileBarrages(dt);
+    }
     const maxParticlesBudget = perfCfg ? perfCfg.maxParticles : 120;
+    const projFowBypass = !!(window.titleScreenActive || window.loadingCameraSweep || window.fowRevealAll);
     // Update Projectiles (Tracks fast-moving air targets so Barracks anti-air infantry reliably hit flying Mutalisks!)
     for (let i = projectiles.length - 1; i >= 0; i--) {
         const p = projectiles[i];
@@ -12732,6 +12914,9 @@ function animate(now) {
 
         _projPrevPosScratch.copy(p.mesh.position);
         p.mesh.position.lerpVectors(p.start, tPos, Math.min(1, p.progress));
+        if (p.isEnemyAcid || p.isBioGoo) {
+            p.mesh.visible = projFowBypass || isWorldPosVisible(p.mesh.position.x, p.mesh.position.z);
+        }
         if (p.wType === 'mortar' || p.isBioGoo || p.isEnemyAcid || p.wType === 'siege_tank') {
             p.mesh.position.y += Math.sin(p.progress * Math.PI) * (p.wType === 'mortar' ? 6.2 : (p.wType === 'siege_tank' ? 4.8 : 2.6));
             if (p.wType === 'siege_tank' && typeof emitThrusterExhaustParticles === 'function') {
@@ -12739,7 +12924,19 @@ function animate(now) {
                 emitThrusterExhaustParticles(p.mesh.position, _projTrailDirScratch, 0.92, true);
             }
         } else if (p.wType === 'rocket' || p.wType === 'heli' || p.wType === 'rocketman' || p.wType === 'valkyrie' || p.wType === 'valk_aa' || p.wType === 'marauder') {
-            p.mesh.position.y += Math.sin(p.progress * Math.PI) * 1.45;
+            // Initial upward climb + curved guidance arc into target radius
+            const climbArc = (p.arcHeight || 2.15) * Math.sin(Math.pow(p.progress, 0.78) * Math.PI);
+            p.mesh.position.y += climbArc;
+            if (p.lateralCurve) {
+                const dx = tPos.x - p.start.x;
+                const dz = tPos.z - p.start.z;
+                const dLen = Math.hypot(dx, dz) || 1;
+                const perpX = -dz / dLen;
+                const perpZ = dx / dLen;
+                const latOffset = Math.sin(p.progress * Math.PI) * p.lateralCurve;
+                p.mesh.position.x += perpX * latOffset;
+                p.mesh.position.z += perpZ * latOffset;
+            }
             if (typeof emitThrusterExhaustParticles === 'function') {
                 _projTrailDirScratch.copy(_projPrevPosScratch).sub(p.mesh.position).normalize();
                 emitThrusterExhaustParticles(p.mesh.position, _projTrailDirScratch, 0.85, false);
@@ -12905,6 +13102,25 @@ function animate(now) {
                     if (Math.hypot(eb.pos.x - tPos.x, eb.pos.z - tPos.z) <= 3.6) {
                         eb.hp -= p.damage;
                         spawnCombatFloat(eb.pos, `${p.damage} SUNLANCE`, '#ffaa00');
+                        updateHUD();
+                    }
+                });
+            } else if (p.wType === 'yamato') {
+                if (typeof spawnBombCrater === 'function' && !p.isAirTarget) spawnBombCrater(tPos, 0.85);
+                if (typeof window.spawnParticleBlastWaveFX === 'function') {
+                    window.spawnParticleBlastWaveFX(tPos, 0xff8800, 1.85, 24);
+                }
+                enemies.forEach(e => {
+                    if (Math.hypot(e.mesh.position.x - tPos.x, e.mesh.position.z - tPos.z) <= 4.6) {
+                        recordRagdollHitImpulse(e, p.start, true);
+                        e.hp -= p.damage;
+                        spawnCombatFloat(e.mesh.position, `${p.damage} YAMATO`, '#ffaa00');
+                    }
+                });
+                enemyBuildings.forEach(eb => {
+                    if (Math.hypot(eb.pos.x - tPos.x, eb.pos.z - tPos.z) <= 5.5) {
+                        eb.hp -= p.damage;
+                        spawnCombatFloat(eb.pos, `${p.damage} YAMATO`, '#ffaa00');
                         updateHUD();
                     }
                 });
@@ -15003,5 +15219,71 @@ window.runZergMovementSimulationTest = function(keepSpawnedUnits = true) {
     return summary;
 };
 
+// ============================================================================
+// STARBLOCK V2 COMPREHENSIVE RUNTIME DIAGNOSTICS & REGRESSION VERIFIER
+// Audits white structures, biome flat-plain structures, out-of-bounds skirt,
+// 3-state FOW & enemy structure hiding, biome skybox, Terran aircraft
+// (Heli, Medivac, Battlecruiser), weapon muzzle world positions,
+// faction projectiles, and staggered Rocketpad missile barrages.
+// ============================================================================
+window.runV2RegressionDiagnostics = function() {
+    const whiteDiag = window.WHITE_STRUCTURE_DIAGNOSTICS || { auditedMeshes: 0, repairedWhiteMeshes: 0, repairedMissingUVs: 0 };
+    let unmappedWhiteStructures = 0;
+    scene.traverse(obj => {
+        if (obj && obj.isMesh && obj.visible && obj.material) {
+            const m = obj.material;
+            if (m.isMeshBasicMaterial && !m.map && m.color && m.color.r > 0.97 && m.color.g > 0.97 && m.color.b > 0.97 && !m.transparent && !m.wireframe) {
+                unmappedWhiteStructures++;
+            }
+        }
+    });
+
+    const fowBypass = !!(window.titleScreenActive || window.loadingCameraSweep || window.fowRevealAll);
+    let enemyBuildingsLeakingInFog = 0;
+    for (let i = 0; i < enemyBuildings.length; i++) {
+        const eb = enemyBuildings[i];
+        if (!eb || !eb.mesh) continue;
+        const vis = fowBypass || isWorldPosVisible(eb.pos.x, eb.pos.z);
+        if (!vis && eb.mesh.visible) enemyBuildingsLeakingInFog++;
+    }
+
+    const skyboxOk = !!(window.BIOME_SKYBOX_SYSTEM && window.BIOME_SKYBOX_SYSTEM.mesh && window.BIOME_SKYBOX_SYSTEM.texture);
+    const oobSkirtOk = !!(window.OUT_OF_BOUNDS_TERRAIN_SYSTEM && window.OUT_OF_BOUNDS_TERRAIN_SYSTEM.mesh);
+    const flatPlainCount = (window.TERRAIN_CLASSIFIER && Array.isArray(window.TERRAIN_CLASSIFIER.lastPlacedBiomeStructures))
+        ? window.TERRAIN_CLASSIFIER.lastPlacedBiomeStructures.length
+        : 0;
+
+    return {
+        ok: unmappedWhiteStructures === 0 && enemyBuildingsLeakingInFog === 0 && skyboxOk && oobSkirtOk && flatPlainCount > 0,
+        whiteStructures: {
+            unmappedWhiteStructures,
+            auditedMeshes: whiteDiag.auditedMeshes,
+            repairedWhiteMeshes: whiteDiag.repairedWhiteMeshes,
+            repairedMissingUVs: whiteDiag.repairedMissingUVs
+        },
+        biomeClassification: {
+            activeBiome: window.ACTIVE_PLANET_BIOME || 'highland',
+            flatPlainStructuresPlaced: flatPlainCount,
+            summary: window.TERRAIN_CLASSIFIER ? window.TERRAIN_CLASSIFIER.classificationSummary : {}
+        },
+        fogOfWar: {
+            enemyBuildingsLeakingInFog,
+            fowDebugModeAvailable: typeof window.toggleFowDebugMode === 'function'
+        },
+        outOfBoundsAndSkybox: {
+            oobSkirtAttached: oobSkirtOk,
+            skyboxAttached: skyboxOk,
+            skyboxBiome: window.BIOME_SKYBOX_SYSTEM ? window.BIOME_SKYBOX_SYSTEM.currentBiome : null
+        },
+        aircraftAndCombat: {
+            thrustFxSystemReady: !!window.THRUST_FX_SYSTEM,
+            projectileVisualFactoryReady: !!window.PROJECTILE_VISUAL_FACTORY,
+            muzzleResolverReady: typeof window.getWeaponMuzzleWorldPos === 'function',
+            rocketpadBarrageReady: typeof window.queueRocketpadMissileBarrage === 'function'
+        }
+    };
+};
+
 window.titleScreenActive = true;
 animate(performance.now());
+

@@ -3574,10 +3574,108 @@ function findClearSpawnPoint(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) {
 }
 
 const generatedMapMeshes = [];
+window.WHITE_STRUCTURE_DIAGNOSTICS = {
+    auditedMeshes: 0,
+    repairedWhiteMeshes: 0,
+    repairedMissingUVs: 0,
+    repairedMissingNormals: 0,
+    repairedMissingMaps: 0,
+    records: []
+};
+
+function ensureGeometryUVsAndNormals(geo, meshName = 'unnamed') {
+    if (!geo || !geo.attributes || !geo.attributes.position) return;
+    const pos = geo.attributes.position;
+    if (!geo.attributes.normal || geo.attributes.normal.count !== pos.count) {
+        try {
+            geo.computeVertexNormals();
+            window.WHITE_STRUCTURE_DIAGNOSTICS.repairedMissingNormals++;
+        } catch (e) {}
+    }
+    let needsUvRepair = !geo.attributes.uv || geo.attributes.uv.count !== pos.count;
+    if (!needsUvRepair && geo.attributes.uv) {
+        const uvArr = geo.attributes.uv.array;
+        for (let i = 0; i < Math.min(uvArr.length, 24); i++) {
+            if (!Number.isFinite(uvArr[i])) {
+                needsUvRepair = true;
+                break;
+            }
+        }
+    }
+    if (needsUvRepair) {
+        const uvs = new Float32Array(pos.count * 2);
+        for (let i = 0; i < pos.count; i++) {
+            const vx = pos.getX(i) || 0;
+            const vy = pos.getY(i) || 0;
+            const vz = pos.getZ(i) || 0;
+            uvs[i * 2] = (vx + vz) * 0.35;
+            uvs[i * 2 + 1] = vy * 0.35 + (vx - vz) * 0.15;
+        }
+        geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+        window.WHITE_STRUCTURE_DIAGNOSTICS.repairedMissingUVs++;
+    }
+}
+
+function getBiomeOrFactionFallbackMaterial(obj, child) {
+    const faction = (obj && obj.userData && obj.userData.faction) || (child && child.userData && child.userData.faction) || '';
+    const biome = (typeof ACTIVE_PLANET_BIOME !== 'undefined' && ACTIVE_PLANET_BIOME) ? ACTIVE_PLANET_BIOME : 'highland';
+    if (typeof MAT !== 'undefined' && MAT) {
+        if (faction === 'zerg' && MAT.zergSkin) return MAT.zergSkin;
+        if (faction === 'solaris' && MAT.protossGold) return MAT.protossGold;
+        if (faction === 'terran' && MAT.terranBase) return MAT.terranBase;
+        if (biome === 'lava' && MAT.obsidianMat) return MAT.obsidianMat;
+        if (biome === 'desert' && MAT.canyonRock) return MAT.canyonRock;
+        if (biome === 'jungle' && MAT.mossRock) return MAT.mossRock;
+        if (biome === 'ocean' && MAT.ruinConcrete) return MAT.ruinConcrete;
+        if (MAT.ruinSteel) return MAT.ruinSteel;
+        if (MAT.terranBase) return MAT.terranBase;
+    }
+    return new THREE.MeshStandardMaterial({
+        color: 0x4b5563,
+        map: window.terranPlateTex || window.terrainDetailTex || null,
+        roughness: 0.58,
+        metalness: 0.45
+    });
+}
+
 function finalizeTerrainStructureLightingAndShadows(obj) {
     if (!obj || typeof obj.traverse !== 'function') return;
+    const rootName = obj.name || (obj.userData && obj.userData.structureType) || 'EnvStructure';
     obj.traverse(child => {
         if (!child || !child.isMesh) return;
+        window.WHITE_STRUCTURE_DIAGNOSTICS.auditedMeshes++;
+        if (child.geometry) {
+            ensureGeometryUVsAndNormals(child.geometry, child.name || rootName);
+        }
+
+        // Detect missing material or default Three.js white fallback material (MeshBasicMaterial with 0xffffff and no map)
+        const mat = child.material;
+        const isDefaultWhiteBasic = !mat || (
+            mat.isMeshBasicMaterial &&
+            !mat.map &&
+            mat.color &&
+            mat.color.r > 0.96 && mat.color.g > 0.96 && mat.color.b > 0.96 &&
+            !mat.transparent &&
+            !mat.wireframe
+        );
+        const isUnmappedPureWhiteStandard = mat && mat.isMeshStandardMaterial && !mat.map && !mat.vertexColors &&
+            mat.color && mat.color.r > 0.96 && mat.color.g > 0.96 && mat.color.b > 0.96 &&
+            (!mat.emissive || (mat.emissive.r < 0.05 && mat.emissive.g < 0.05 && mat.emissive.b < 0.05));
+
+        if (isDefaultWhiteBasic || isUnmappedPureWhiteStandard) {
+            const replacement = getBiomeOrFactionFallbackMaterial(obj, child);
+            window.WHITE_STRUCTURE_DIAGNOSTICS.repairedWhiteMeshes++;
+            if (window.WHITE_STRUCTURE_DIAGNOSTICS.records.length < 60) {
+                window.WHITE_STRUCTURE_DIAGNOSTICS.records.push({
+                    model: rootName,
+                    mesh: child.name || 'childMesh',
+                    reason: !mat ? 'missing_material' : (isDefaultWhiteBasic ? 'default_white_basic_material' : 'unmapped_white_standard_material'),
+                    assignedFallback: replacement.name || 'BiomeFactionFallback'
+                });
+            }
+            child.material = replacement;
+        }
+
         if (child.material && !child.material.isShaderMaterial && child.material.type !== 'ShaderMaterial') {
             child.receiveShadow = true;
             if (!IS_MOBILE) {
@@ -3585,23 +3683,33 @@ function finalizeTerrainStructureLightingAndShadows(obj) {
                     child.geometry.computeBoundingSphere();
                 }
                 const bRad = (child.geometry && child.geometry.boundingSphere) ? child.geometry.boundingSphere.radius : 1.0;
-                // Only primary structure hulls and large trees (>= 1.15m) cast shadows so 2,000+ tiny slats/sandbags don't lag the shadow pass!
                 child.castShadow = bRad >= 1.15;
             }
             if (child.material.isMeshBasicMaterial) {
                 const baseColor = child.material.color ? child.material.color.clone() : new THREE.Color(0x38bdf8);
+                // Prevent pure white basic materials from turning into glowing white blobs
+                if (baseColor.r > 0.92 && baseColor.g > 0.92 && baseColor.b > 0.92 && !child.material.transparent) {
+                    baseColor.setHex(0x64748b);
+                }
                 const convertedMat = new THREE.MeshStandardMaterial({
                     color: baseColor,
-                    emissive: baseColor.clone().multiplyScalar(0.32),
-                    emissiveIntensity: 0.22,
-                    roughness: 0.42,
-                    metalness: 0.25,
+                    map: child.material.map || window.terrainDetailTex || null,
+                    emissive: baseColor.clone().multiplyScalar(0.24),
+                    emissiveIntensity: 0.18,
+                    roughness: 0.48,
+                    metalness: 0.28,
                     transparent: Boolean(child.material.transparent),
                     opacity: child.material.opacity !== undefined ? child.material.opacity : 1.0
                 });
                 child.material = convertedMat;
             } else if (child.material.emissiveIntensity !== undefined && child.material.emissiveIntensity > 0.28) {
                 child.material.emissiveIntensity = Math.min(0.28, child.material.emissiveIntensity * 0.45);
+            }
+            // Ensure cloned standard materials retain a detail texture map if neither map nor vertexColors is set
+            if (child.material.isMeshStandardMaterial && !child.material.map && !child.material.vertexColors && !child.material.transparent && window.terrainDetailTex) {
+                child.material.map = window.terrainDetailTex;
+                child.material.needsUpdate = true;
+                window.WHITE_STRUCTURE_DIAGNOSTICS.repairedMissingMaps++;
             }
             if (typeof SHADER_ENGINE !== 'undefined' && typeof SHADER_ENGINE.applyBuildingShader === 'function') {
                 if (!child.material.userData || (!child.material.userData.fowEnhanced && !child.material.userData.terrainEnhanced)) {
@@ -3611,6 +3719,7 @@ function finalizeTerrainStructureLightingAndShadows(obj) {
         }
     });
 }
+window.finalizeTerrainStructureLightingAndShadows = finalizeTerrainStructureLightingAndShadows;
 function addMapMesh(obj) {
     finalizeTerrainStructureLightingAndShadows(obj);
     scene.add(obj);
@@ -13320,6 +13429,11 @@ function populateProceduralWorldEcosystem() {
         }
     });
 
+    // 5B. Multi-Sample Flat-Plain Biome Structure Placement across all 5 Biomes
+    if (window.TERRAIN_CLASSIFIER && typeof window.TERRAIN_CLASSIFIER.populateFlatPlainBiomeStructures === 'function') {
+        window.TERRAIN_CLASSIFIER.populateFlatPlainBiomeStructures(biome);
+    }
+
     // 6. Autonomous Wildlife & Frontier Civilian Simulation
     createAutonomousWildlifeAndCivilians();
 }
@@ -13809,6 +13923,8 @@ window.regenerateMapDynamically = function(customSeed, lobbyPlayers) {
     populateDynamicWorldPropsAndLandmarks();
     validateGeneratedMap();
     updateZergCreepColors(creepRadius, false, true);
+    if (window.OUT_OF_BOUNDS_TERRAIN_SYSTEM) window.OUT_OF_BOUNDS_TERRAIN_SYSTEM.rebuild();
+    if (window.BIOME_SKYBOX_SYSTEM) window.BIOME_SKYBOX_SYSTEM.rebuild(ACTIVE_PLANET_BIOME, MAP_SEED);
 
     if (typeof window.resetMatchForNewMap === 'function') {
         window.resetMatchForNewMap(MAP_SEED, window.CUSTOM_LOBBY_PLAYERS);
@@ -13818,6 +13934,9 @@ window.regenerateMapDynamically = function(customSeed, lobbyPlayers) {
 window.regenerateDynamicSectorMap = window.regenerateMapDynamically;
 
 function updateBiomeLandmarks(dt) {
+    if (window.BIOME_SKYBOX_SYSTEM && typeof window.BIOME_SKYBOX_SYSTEM.update === 'function') {
+        window.BIOME_SKYBOX_SYSTEM.update(dt);
+    }
     for (let i = 0; i < animatedBiomeLandmarks.length; i++) {
         const lm = animatedBiomeLandmarks[i];
         lm.phase += dt * 2.6;
@@ -13961,6 +14080,539 @@ function updateBiomeLandmarks(dt) {
     }
 }
 window.updateBiomeLandmarks = updateBiomeLandmarks;
+
+// ============================================================================
+// MULTI-SAMPLE TERRAIN CLASSIFIER & FLAT-PLAIN BIOME STRUCTURE GENERATOR
+// Detects: flat_plains, hills, highland_plateaus, slopes, cliffs, ravines,
+//          rivers, shorelines, rocky_terrain, forested_areas
+// ============================================================================
+const TERRAIN_CLASSIFIER = {
+    lastPlacedBiomeStructures: [],
+    classificationSummary: {},
+    classifyArea(wx, wz, footprintRadius = 4.5) {
+        const r = Math.max(1.5, footprintRadius);
+        const offsets = [
+            [0, 0],
+            [-r, 0], [r, 0], [0, -r], [0, r],
+            [-r * 0.7, -r * 0.7], [r * 0.7, -r * 0.7],
+            [-r * 0.7, r * 0.7], [r * 0.7, r * 0.7]
+        ];
+        let minH = Infinity;
+        let maxH = -Infinity;
+        let sumH = 0;
+        let sumNy = 0;
+        for (let i = 0; i < offsets.length; i++) {
+            const sx = wx + offsets[i][0];
+            const sz = wz + offsets[i][1];
+            const h = getTerrainHeight(sx, sz);
+            if (h < minH) minH = h;
+            if (h > maxH) maxH = h;
+            sumH += h;
+            const hx1 = getTerrainHeight(sx - 0.9, sz);
+            const hx2 = getTerrainHeight(sx + 0.9, sz);
+            const hz1 = getTerrainHeight(sx, sz - 0.9);
+            const hz2 = getTerrainHeight(sx, sz + 0.9);
+            const dx = (hx2 - hx1) / 1.8;
+            const dz = (hz2 - hz1) / 1.8;
+            const ny = 1.0 / Math.sqrt(dx * dx + 1.0 + dz * dz);
+            sumNy += ny;
+        }
+        const meanH = sumH / offsets.length;
+        const heightDiff = maxH - minH;
+        const avgNormalY = sumNy / offsets.length;
+
+        const inRiver = (typeof isInRiverWaterChannel === 'function' && isInRiverWaterChannel(wx, wz, 0.5)) || meanH <= (WATER_LEVEL + 0.08);
+        const nearWater = (typeof isInRiverWaterChannel === 'function' && isInRiverWaterChannel(wx, wz, 4.2)) || (meanH > WATER_LEVEL - 0.15 && meanH <= WATER_LEVEL + 0.45);
+        let inForest = false;
+        for (let i = 0; i < PROCEDURAL_FOREST_GROVES.length; i++) {
+            const g = PROCEDURAL_FOREST_GROVES[i];
+            if (Math.hypot(wx - g.x, wz - g.z) <= (g.r || 9.5) + 1.5) {
+                inForest = true;
+                break;
+            }
+        }
+        let nearRock = false;
+        for (let i = 0; i < obstacles.length; i++) {
+            const ob = obstacles[i];
+            if (ob && Math.hypot(wx - ob.x, wz - ob.z) <= (ob.r || 2.0) + 2.8) {
+                nearRock = true;
+                break;
+            }
+        }
+
+        let category = 'hills';
+        if (inRiver) {
+            category = 'rivers';
+        } else if (nearWater && heightDiff < 1.1) {
+            category = 'shorelines';
+        } else if (heightDiff > 2.35 || avgNormalY < 0.78) {
+            category = 'cliffs';
+        } else if (meanH < -0.55 && heightDiff > 0.95) {
+            category = 'ravines';
+        } else if (heightDiff > 0.85 || avgNormalY < 0.945) {
+            category = 'slopes';
+        } else if (inForest) {
+            category = 'forested_areas';
+        } else if (nearRock) {
+            category = 'rocky_terrain';
+        } else if (meanH >= 2.2 && heightDiff <= 0.75 && avgNormalY >= 0.96) {
+            category = 'highland_plateaus';
+        } else if (heightDiff <= 0.72 && avgNormalY >= 0.962 && meanH > WATER_LEVEL + 0.22) {
+            category = 'flat_plains';
+        }
+
+        return {
+            category,
+            isFlatPlain: (category === 'flat_plains' || category === 'highland_plateaus') && heightDiff <= 0.75 && avgNormalY >= 0.96,
+            heightDiff,
+            avgNormalY,
+            meanH,
+            minH,
+            maxH
+        };
+    },
+    scanBiomeFlatPlains(gridStep = 16, footprintRadius = 4.8) {
+        const flatSpots = [];
+        const summary = {
+            flat_plains: 0,
+            hills: 0,
+            highland_plateaus: 0,
+            slopes: 0,
+            cliffs: 0,
+            ravines: 0,
+            rivers: 0,
+            shorelines: 0,
+            rocky_terrain: 0,
+            forested_areas: 0
+        };
+        for (let x = -88; x <= 88; x += gridStep) {
+            for (let z = -88; z <= 88; z += gridStep) {
+                const info = this.classifyArea(x, z, footprintRadius);
+                if (summary[info.category] !== undefined) summary[info.category]++;
+                if (info.isFlatPlain && isSafeForProp(x, z, footprintRadius + 1.4)) {
+                    flatSpots.push({ x, z, ...info });
+                }
+            }
+        }
+        this.classificationSummary = summary;
+        return flatSpots;
+    },
+    buildBiomeFlatPlainStructureMesh(biome, variantIdx, wx, wz, yaw) {
+        const group = new THREE.Group();
+        const groundY = getTerrainHeight(wx, wz);
+        group.position.set(wx, groundY, wz);
+        group.rotation.y = yaw;
+        group.userData.isBiomeFlatPlainStructure = true;
+        group.userData.biome = biome;
+
+        // Grounding foundation plinth so structure sits flush on terrain
+        const plinthMat = (biome === 'lava' ? MAT.obsidianMat : (biome === 'desert' ? MAT.canyonRock : (biome === 'jungle' ? MAT.mossRock : MAT.ruinConcrete))) || MAT.terranBase;
+        const steelMat = MAT.ruinSteel || MAT.terranBase;
+        const darkMat = MAT.ruinSteelDark || MAT.terranDark;
+        const glowMat = (biome === 'lava' ? MAT.hazardGlow : MAT.trimGlow) || MAT.terranCyan;
+
+        const plinth = new THREE.Mesh(new THREE.CylinderGeometry(3.4, 3.85, 0.75, 8), plinthMat);
+        plinth.position.y = 0.22;
+        group.add(plinth);
+
+        if (biome === 'highland') {
+            // Highland: Abandoned Military Outpost / Comm Relay / Fortified Watch Installation
+            group.name = 'HighlandFlatPlainOutpost';
+            const bunker = new THREE.Mesh(new THREE.BoxGeometry(3.6, 1.9, 2.8), MAT.bunkerMat || steelMat);
+            bunker.position.set(-0.4, 1.35, 0);
+            group.add(bunker);
+            const roof = new THREE.Mesh(new THREE.BoxGeometry(3.9, 0.32, 3.1), darkMat);
+            roof.position.set(-0.4, 2.42, 0);
+            group.add(roof);
+            const towerMast = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.34, 4.4, 6), steelMat);
+            towerMast.position.set(1.65, 2.6, 0.55);
+            group.add(towerMast);
+            const dish = new THREE.Mesh(new THREE.ConeGeometry(0.85, 0.48, 8), MAT.silver || steelMat);
+            dish.rotation.x = Math.PI * 0.35;
+            dish.position.set(1.65, 4.65, 0.75);
+            group.add(dish);
+            const beacon = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, 0.35), glowMat);
+            beacon.position.set(1.65, 4.95, 0.55);
+            group.add(beacon);
+        } else if (biome === 'desert') {
+            // Desert: Arid Drilling Rig & Solar Condenser Depot
+            group.name = 'DesertFlatPlainDepot';
+            const tank1 = new THREE.Mesh(new THREE.CylinderGeometry(1.05, 1.05, 2.7, 10), MAT.ruinPlaster || plinthMat);
+            tank1.position.set(-1.1, 1.75, -0.4);
+            group.add(tank1);
+            const tank2 = new THREE.Mesh(new THREE.CylinderGeometry(0.85, 0.85, 2.3, 10), steelMat);
+            tank2.position.set(0.95, 1.55, -0.6);
+            group.add(tank2);
+            const derrick = new THREE.Mesh(new THREE.ConeGeometry(1.1, 3.8, 4), darkMat);
+            derrick.position.set(0.2, 2.3, 1.0);
+            group.add(derrick);
+            const solarPanel = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.14, 1.5), MAT.glassMat || glowMat);
+            solarPanel.rotation.x = -0.35;
+            solarPanel.position.set(-0.2, 3.25, -0.4);
+            group.add(solarPanel);
+        } else if (biome === 'jungle') {
+            // Jungle: Overgrown Research Outpost & Stepped Stone Temple Sanctuary
+            group.name = 'JungleFlatPlainSanctuary';
+            const step1 = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.9, 4.2), MAT.mossRock || plinthMat);
+            step1.position.y = 0.85;
+            group.add(step1);
+            const step2 = new THREE.Mesh(new THREE.BoxGeometry(2.9, 1.1, 2.9), MAT.ruinConcrete || plinthMat);
+            step2.position.y = 1.85;
+            group.add(step2);
+            const sanctum = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.4, 1.8), steelMat);
+            sanctum.position.y = 3.05;
+            group.add(sanctum);
+            const canopy = new THREE.Mesh(new THREE.ConeGeometry(2.1, 1.2, 6), MAT.foliagePine || plinthMat);
+            canopy.position.set(-1.2, 2.9, 1.1);
+            group.add(canopy);
+            const bioPod = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 1.1, 8), glowMat);
+            bioPod.position.set(0, 4.0, 0);
+            group.add(bioPod);
+        } else if (biome === 'ocean') {
+            // Ocean: Coastal Radar Beacon & Archipelago Supply Pier
+            group.name = 'OceanFlatPlainBeacon';
+            const baseHouse = new THREE.Mesh(new THREE.CylinderGeometry(1.45, 1.75, 2.1, 8), MAT.ruinConcrete || plinthMat);
+            baseHouse.position.y = 1.45;
+            group.add(baseHouse);
+            const spire = new THREE.Mesh(new THREE.CylinderGeometry(0.68, 1.15, 3.4, 8), MAT.medivacHull || steelMat);
+            spire.position.y = 3.95;
+            group.add(spire);
+            const lantern = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.75, 0.85, 8), glowMat);
+            lantern.position.y = 5.85;
+            group.add(lantern);
+            const cap = new THREE.Mesh(new THREE.ConeGeometry(0.95, 0.75, 8), darkMat);
+            cap.position.y = 6.55;
+            group.add(cap);
+        } else {
+            // Lava: Geothermal Magma Extractor & Fortified Basalt Monolith Outpost
+            group.name = 'LavaFlatPlainExtractor';
+            const coreHull = new THREE.Mesh(new THREE.CylinderGeometry(1.65, 2.1, 2.6, 6), MAT.obsidianMat || darkMat);
+            coreHull.position.y = 1.7;
+            group.add(coreHull);
+            const heatShield = new THREE.Mesh(new THREE.CylinderGeometry(2.25, 2.25, 0.65, 6), steelMat);
+            heatShield.position.y = 2.65;
+            group.add(heatShield);
+            const magmaCore = new THREE.Mesh(new THREE.CylinderGeometry(0.65, 0.85, 3.8, 8), MAT.hazardGlow || glowMat);
+            magmaCore.position.y = 2.45;
+            group.add(magmaCore);
+            for (let i = 0; i < 3; i++) {
+                const a = (i / 3) * Math.PI * 2;
+                const Buttress = new THREE.Mesh(new THREE.BoxGeometry(0.7, 2.8, 1.25), darkMat);
+                Buttress.position.set(Math.cos(a) * 1.85, 1.65, Math.sin(a) * 1.85);
+                Buttress.rotation.y = -a;
+                group.add(Buttress);
+            }
+        }
+
+        addMapMesh(group);
+        registerObstacle(wx, wz, 3.6);
+        DESTRUCTIBLE_ENV_STRUCTURES.push({
+            kind: 'building',
+            x: wx,
+            z: wz,
+            radius: 3.6,
+            hp: 340,
+            maxHp: 340,
+            mesh: group
+        });
+        return group;
+    },
+    populateFlatPlainBiomeStructures(biome = 'highland') {
+        this.lastPlacedBiomeStructures = [];
+        const flatCandidates = this.scanBiomeFlatPlains(15, 4.6);
+        if (flatCandidates.length === 0) return [];
+
+        // Deterministic sort using seeded pseudo-hash so placement is 100% reproducible per MAP_SEED
+        const seedVal = Number(MAP_SEED) || 100001;
+        flatCandidates.sort((a, b) => {
+            const ha = Math.sin(a.x * 12.9898 + a.z * 78.233 + seedVal * 0.01) * 43758.5453;
+            const hb = Math.sin(b.x * 12.9898 + b.z * 78.233 + seedVal * 0.01) * 43758.5453;
+            return (ha - Math.floor(ha)) - (hb - Math.floor(hb));
+        });
+
+        const targetCount = IS_MOBILE ? 4 : 6;
+        const chosen = [];
+        for (let i = 0; i < flatCandidates.length && chosen.length < targetCount; i++) {
+            const cand = flatCandidates[i];
+            let tooClose = false;
+            for (let j = 0; j < chosen.length; j++) {
+                if (Math.hypot(cand.x - chosen[j].x, cand.z - chosen[j].z) < 22.0) {
+                    tooClose = true;
+                    break;
+                }
+            }
+            if (tooClose) continue;
+            if (!isSafeForProp(cand.x, cand.z, 5.2)) continue;
+            const yaw = ((i * 1.618 + seedVal * 0.017) % 1.0) * Math.PI * 2;
+            const mesh = this.buildBiomeFlatPlainStructureMesh(biome, chosen.length, cand.x, cand.z, yaw);
+            const rec = {
+                biome,
+                x: cand.x,
+                z: cand.z,
+                heightDiff: cand.heightDiff,
+                avgNormalY: cand.avgNormalY,
+                category: cand.category,
+                meshName: mesh.name
+            };
+            chosen.push(rec);
+            this.lastPlacedBiomeStructures.push(rec);
+        }
+        return this.lastPlacedBiomeStructures;
+    }
+};
+window.TERRAIN_CLASSIFIER = TERRAIN_CLASSIFIER;
+
+// ============================================================================
+// SEAMLESS OUT-OF-BOUNDS TERRAIN SKIRT SYSTEM
+// Extends biome terrain geometry, vertex colors, texture, and FOW darkening
+// naturally beyond [-130..+130] to [-390..+390] with zero bright floor cutoff.
+// ============================================================================
+const OUT_OF_BOUNDS_TERRAIN_SYSTEM = {
+    mesh: null,
+    rebuild() {
+        if (this.mesh) {
+            if (this.mesh.parent) this.mesh.parent.remove(this.mesh);
+            if (this.mesh.geometry) {
+                try { this.mesh.geometry.dispose(); } catch (e) {}
+            }
+            this.mesh = null;
+        }
+        if (typeof scene === 'undefined' || !scene || typeof terrainMat === 'undefined' || !terrainMat) return;
+
+        const outerSize = MAP_SIZE * 3.0; // 780x780m world horizon skirt
+        const segs = IS_MOBILE ? 56 : 84;
+        const skirtGeo = new THREE.PlaneGeometry(outerSize, outerSize, segs, segs);
+        skirtGeo.rotateX(-Math.PI / 2);
+
+        const pos = skirtGeo.attributes.position;
+        const colors = new Float32Array(pos.count * 3);
+        const halfPlayable = MAP_SIZE * 0.5 - 1.2; // 128.8m overlap with playable border
+        const biome = ACTIVE_PLANET_BIOME || 'highland';
+
+        let baseR = 0.24, baseG = 0.30, baseB = 0.22;
+        if (biome === 'desert') { baseR = 0.52; baseG = 0.39; baseB = 0.25; }
+        else if (biome === 'jungle') { baseR = 0.16; baseG = 0.32; baseB = 0.17; }
+        else if (biome === 'ocean') { baseR = 0.14; baseG = 0.28; baseB = 0.36; }
+        else if (biome === 'lava') { baseR = 0.16; baseG = 0.11; baseB = 0.10; }
+
+        for (let i = 0; i < pos.count; i++) {
+            const vx = pos.getX(i);
+            const vz = pos.getZ(i);
+            const clampedX = THREE.MathUtils.clamp(vx, -halfPlayable, halfPlayable);
+            const clampedZ = THREE.MathUtils.clamp(vz, -halfPlayable, halfPlayable);
+            const distOut = Math.hypot(vx - clampedX, vz - clampedZ);
+
+            let vy;
+            if (distOut < 0.05) {
+                // Depress interior under playable map slightly so it never z-fights with playable terrain
+                vy = getTerrainHeight(vx, vz) - 2.6;
+            } else {
+                const edgeH = getTerrainHeight(clampedX, clampedZ);
+                const ridge = Math.sin(vx * 0.035 + vz * 0.028) * 2.2 + Math.cos(vx * 0.019 - vz * 0.031) * 1.8;
+                const blend = Math.min(1.0, distOut / 36.0);
+                const horizonDrop = Math.max(0, (distOut - 95.0) * 0.035);
+                vy = THREE.MathUtils.lerp(edgeH - 0.12, edgeH * 0.65 + ridge - horizonDrop, blend);
+            }
+            pos.setY(i, vy);
+
+            const nVar = 0.85 + 0.15 * Math.sin(vx * 0.06 + vz * 0.05);
+            const distDarken = THREE.MathUtils.clamp(1.0 - (distOut / 320.0) * 0.52, 0.42, 1.0);
+            colors[i * 3]     = baseR * nVar * distDarken;
+            colors[i * 3 + 1] = baseG * nVar * distDarken;
+            colors[i * 3 + 2] = baseB * nVar * distDarken;
+        }
+
+        skirtGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        skirtGeo.computeVertexNormals();
+        skirtGeo.computeBoundingBox();
+        skirtGeo.computeBoundingSphere();
+
+        const skirtMesh = new THREE.Mesh(skirtGeo, terrainMat);
+        skirtMesh.name = 'OutOfBoundsTerrainSkirt';
+        skirtMesh.receiveShadow = true;
+        scene.add(skirtMesh);
+        this.mesh = skirtMesh;
+        return skirtMesh;
+    }
+};
+window.OUT_OF_BOUNDS_TERRAIN_SYSTEM = OUT_OF_BOUNDS_TERRAIN_SYSTEM;
+
+// ============================================================================
+// BIOME-SPECIFIC PROCEDURAL SKYBOX DOME SYSTEM
+// Matches ACTIVE_PLANET_BIOME & MAP_SEED, follows camera translation,
+// and blends seamlessly with terrain fog and out-of-bounds horizon.
+// ============================================================================
+const BIOME_SKYBOX_SYSTEM = {
+    mesh: null,
+    texture: null,
+    currentBiome: null,
+    currentSeed: null,
+    palettes: {
+        highland: {
+            zenith: '#060c18',
+            upper: '#0e1d36',
+            mid: '#1b3152',
+            horizon: '#0b111c',
+            nadir: '#060911',
+            cloud: 'rgba(130, 175, 225, 0.18)',
+            ridge: '#080e18',
+            starTint: 'rgba(205, 230, 255, 0.75)'
+        },
+        desert: {
+            zenith: '#140c08',
+            upper: '#2e1b10',
+            mid: '#4d2d1b',
+            horizon: '#140e0a',
+            nadir: '#090604',
+            cloud: 'rgba(230, 170, 115, 0.18)',
+            ridge: '#120b07',
+            starTint: 'rgba(255, 225, 185, 0.65)'
+        },
+        jungle: {
+            zenith: '#051210',
+            upper: '#0b2622',
+            mid: '#153b34',
+            horizon: '#081210',
+            nadir: '#040908',
+            cloud: 'rgba(110, 210, 185, 0.18)',
+            ridge: '#06100d',
+            starTint: 'rgba(185, 255, 230, 0.65)'
+        },
+        ocean: {
+            zenith: '#040d1c',
+            upper: '#092242',
+            mid: '#123e6b',
+            horizon: '#08111b',
+            nadir: '#04080e',
+            cloud: 'rgba(135, 205, 255, 0.20)',
+            ridge: '#060d16',
+            starTint: 'rgba(195, 235, 255, 0.78)'
+        },
+        lava: {
+            zenith: '#110404',
+            upper: '#290907',
+            mid: '#4a140c',
+            horizon: '#140705',
+            nadir: '#090302',
+            cloud: 'rgba(255, 105, 45, 0.22)',
+            ridge: '#100403',
+            starTint: 'rgba(255, 165, 110, 0.60)'
+        }
+    },
+    rebuild(biome = ACTIVE_PLANET_BIOME || 'highland', seed = MAP_SEED || 100001) {
+        const pal = this.palettes[biome] || this.palettes.highland;
+        const canvas = document.createElement('canvas');
+        canvas.width = 512;
+        canvas.height = 256;
+        const ctx = canvas.getContext('2d');
+
+        // 1. Vertical atmospheric gradient (Zenith -> Upper -> Mid -> Horizon Shroud -> Nadir)
+        const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        grad.addColorStop(0.0, pal.zenith);
+        grad.addColorStop(0.28, pal.upper);
+        grad.addColorStop(0.46, pal.mid);
+        grad.addColorStop(0.53, pal.horizon);
+        grad.addColorStop(1.0, pal.nadir);
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // 2. Deterministic Starfield & Nebula Haze in Upper Hemisphere
+        let s = Number(seed) || 100001;
+        const rand = () => {
+            s = (s * 1664525 + 1013904223) % 4294967296;
+            return s / 4294967296;
+        };
+        ctx.fillStyle = pal.starTint;
+        for (let i = 0; i < 160; i++) {
+            const sx = rand() * canvas.width;
+            const sy = rand() * (canvas.height * 0.42);
+            const sr = 0.6 + rand() * 1.3;
+            ctx.beginPath();
+            ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // 3. Soft Atmospheric Cloud Bands above Horizon
+        ctx.fillStyle = pal.cloud;
+        for (let c = 0; c < 28; c++) {
+            const cx = rand() * canvas.width;
+            const cy = canvas.height * (0.26 + rand() * 0.20);
+            const rw = 36 + rand() * 75;
+            const rh = 6 + rand() * 14;
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, rw, rh, 0, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // 4. Distant Planetary Mountain / Mesa / Volcanic Silhouettes along Horizon
+        ctx.fillStyle = pal.ridge;
+        ctx.beginPath();
+        const horizonY = canvas.height * 0.52;
+        ctx.moveTo(0, canvas.height);
+        ctx.lineTo(0, horizonY);
+        for (let x = 0; x <= canvas.width; x += 8) {
+            const nx = (x / canvas.width) * Math.PI * 2;
+            const h1 = Math.sin(nx * 4.0 + s * 0.001) * 10.0;
+            const h2 = Math.cos(nx * 9.0 - s * 0.002) * 5.5;
+            const h3 = Math.abs(Math.sin(nx * 15.0)) * 4.0;
+            ctx.lineTo(x, horizonY - Math.max(0, h1 + h2 + h3));
+        }
+        ctx.lineTo(canvas.width, canvas.height);
+        ctx.closePath();
+        ctx.fill();
+
+        if (this.texture) {
+            try { this.texture.dispose(); } catch (e) {}
+        }
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.needsUpdate = true;
+        this.texture = tex;
+        this.currentBiome = biome;
+        this.currentSeed = seed;
+
+        if (!this.mesh) {
+            const skyGeo = new THREE.SphereGeometry(520, 32, 20);
+            const skyMat = new THREE.MeshBasicMaterial({
+                map: tex,
+                side: THREE.BackSide,
+                depthWrite: false,
+                fog: false
+            });
+            this.mesh = new THREE.Mesh(skyGeo, skyMat);
+            this.mesh.name = 'BiomeSkyboxDome';
+            this.mesh.renderOrder = -100;
+            if (typeof scene !== 'undefined' && scene) {
+                scene.add(this.mesh);
+            }
+        } else {
+            this.mesh.material.map = tex;
+            this.mesh.material.needsUpdate = true;
+            if (!this.mesh.parent && typeof scene !== 'undefined' && scene) {
+                scene.add(this.mesh);
+            }
+        }
+        return this.mesh;
+    },
+    update() {
+        if (!this.mesh) return;
+        if (typeof camera !== 'undefined' && camera) {
+            this.mesh.position.x = camera.position.x;
+            this.mesh.position.z = camera.position.z;
+            this.mesh.position.y = 0;
+        }
+    }
+};
+window.BIOME_SKYBOX_SYSTEM = BIOME_SKYBOX_SYSTEM;
+
+// Initialize flat-plain biome structures, out-of-bounds skirt, and biome skybox on initial load
+if (window.TERRAIN_CLASSIFIER) {
+    window.TERRAIN_CLASSIFIER.populateFlatPlainBiomeStructures(ACTIVE_PLANET_BIOME || 'highland');
+}
+window.OUT_OF_BOUNDS_TERRAIN_SYSTEM.rebuild();
+window.BIOME_SKYBOX_SYSTEM.rebuild(ACTIVE_PLANET_BIOME || 'highland', MAP_SEED);
+
 
 
 

@@ -2428,9 +2428,10 @@ const fowCloudShaderMat = new THREE.ShaderMaterial({
             cloudCol = mix(cloudCol, cloudSilverCrest, smoothstep(0.52, 0.92, billow * 0.65 + cloudLit * 0.45) * (0.42 + edgeBand * 0.58));
 
             float puffDensity = mix(0.60, 1.05, smoothstep(0.25, 0.85, billow));
-            // Explored areas (rawFow ~ 0.45) get almost zero cloud veil; unexplored areas get a subtle translucent mist (max 0.22 alpha)
-            float unexploredWeight = smoothstep(0.42, 0.88, rawFow);
-            float finalAlpha = clamp((softFow * 0.08 + unexploredWeight * 0.16) * puffDensity, 0.0, 0.22);
+            // Explored areas (rawFow ~ 0.50) get a subtle memory mist; unexplored areas get a denser shroud veil
+            float unexploredWeight = smoothstep(0.58, 0.90, rawFow);
+            float exploredWeight = smoothstep(0.12, 0.48, rawFow) * (1.0 - unexploredWeight);
+            float finalAlpha = clamp((exploredWeight * 0.14 + unexploredWeight * 0.42) * puffDensity, 0.0, 0.46);
             gl_FragColor = vec4(cloudCol, finalAlpha);
         }
     `
@@ -2497,6 +2498,7 @@ const SHADER_ENGINE = {
         uTitleScreen: _sharedTitleFlag,
         uSunLightFactor: _sharedSunLightFactor,
         uShaderStage: { value: 4.0 },
+        uFowDebugMode: { value: 0.0 },
         uCreepCenter: { value: new THREE.Vector2(-74.0, -74.0) },
         uCreepRadius: { value: 16.5 },
         uCreepNodes: { value: _defaultCreepNodes },
@@ -2662,6 +2664,7 @@ const SHADER_ENGINE = {
             shader.uniforms.uTitleScreen = this.terrainUniforms.uTitleScreen;
             shader.uniforms.uSunLightFactor = this.terrainUniforms.uSunLightFactor;
             shader.uniforms.uShaderStage = this.terrainUniforms.uShaderStage;
+            shader.uniforms.uFowDebugMode = this.terrainUniforms.uFowDebugMode;
             shader.uniforms.uCreepCenter = this.terrainUniforms.uCreepCenter;
             shader.uniforms.uCreepRadius = this.terrainUniforms.uCreepRadius;
             shader.uniforms.uCreepNodes = this.terrainUniforms.uCreepNodes;
@@ -2749,6 +2752,7 @@ const SHADER_ENGINE = {
                 uniform float uTitleScreen;
                 uniform float uSunLightFactor;
                 uniform float uShaderStage;
+                uniform float uFowDebugMode;
                 uniform vec2 uCreepCenter;
                 uniform float uCreepRadius;
                 uniform vec3 uCreepNodes[${MAX_CREEP_SHADER_NODES}];
@@ -2918,30 +2922,65 @@ const SHADER_ENGINE = {
             ).replace(
                 '#include <dithering_fragment>',
                 `#include <dithering_fragment>
-                // 6. Color-Preserving Fog of War Overlay (Separates base biome terrain color from atmospheric FOW tint;
-                //    visible areas = 100% biome color, explored areas = 82% brightness, unexplored areas = recognizable biome color + subtle slate mist)
+                // 6. Three-State Fog of War & Seamless Out-of-Bounds Horizon Shroud
+                //    State 0 (Visible, fA < 0.12): 100% biome & structure lighting
+                //    State 1 (Explored, fA ~ 0.45..0.60): Darkened cool memory state (~0.40 brightness)
+                //    State 2 (Unexplored / Out-of-Bounds, fA > 0.80): Deep shroud (~0.13 brightness) with biome horizon blend
                 if (uHasFow > 0.5 && uTitleScreen < 0.5 && uShaderStage > 3.5) {
                     vec2 fowUv = vec2((vCustomWorldPos.x / uMapSize) + 0.5, 0.5 - (vCustomWorldPos.z / uMapSize));
-                    if (fowUv.x >= 0.0 && fowUv.x <= 1.0 && fowUv.y >= 0.0 && fowUv.y <= 1.0) {
-                        vec2 tStep = vec2(1.25 / 160.0);
-                        float fA = texture2D(uFowMap, fowUv).a * 0.40
-                                 + texture2D(uFowMap, fowUv + vec2(tStep.x, 0.0)).a * 0.15
-                                 + texture2D(uFowMap, fowUv - vec2(tStep.x, 0.0)).a * 0.15
-                                 + texture2D(uFowMap, fowUv + vec2(0.0, tStep.y)).a * 0.15
-                                 + texture2D(uFowMap, fowUv - vec2(0.0, tStep.y)).a * 0.15;
-                        float fowIntensity = smoothstep(0.04, 0.92, fA);
-                        vec3 baseCol = gl_FragColor.rgb;
-                        float texLuma = dot(baseCol, vec3(0.299, 0.587, 0.114));
-                        vec3 coolTint = mix(baseCol, vec3(texLuma) * vec3(0.76, 0.86, 0.98), 0.24);
-                        vec3 exploredCol = coolTint * (uIsBuilding > 0.5 ? 0.78 : 0.82);
-                        vec3 fogAtmosphere = vec3(0.18, 0.25, 0.35);
-                        vec3 unexploredCol = mix(coolTint * 0.64, fogAtmosphere, 0.34);
-                        vec3 targetFowCol = mix(exploredCol, unexploredCol, smoothstep(0.42, 0.84, fowIntensity));
-                        float visionEdge = 4.0 * fowIntensity * (1.0 - fowIntensity);
-                        targetFowCol += vec3(0.03, 0.06, 0.11) * visionEdge * (0.4 + 0.6 * texLuma);
-                        // Preserve lava fissure emissive glow even in unexplored areas
-                        float fowMixWeight = clamp(fowIntensity * (1.0 - lavaFissureGlow * 0.70), 0.0, 0.72);
-                        gl_FragColor.rgb = mix(baseCol, targetFowCol, fowMixWeight);
+                    vec2 clampedUv = clamp(fowUv, vec2(0.004), vec2(0.996));
+                    vec2 oobDelta = max(vec2(0.0), abs(fowUv - vec2(0.5)) - vec2(0.492));
+                    float oobDist = length(oobDelta) * uMapSize;
+                    float oobWeight = clamp(oobDist / 28.0, 0.0, 1.0);
+
+                    vec2 tStep = vec2(1.25 / 160.0);
+                    float fA = texture2D(uFowMap, clampedUv).a * 0.40
+                             + texture2D(uFowMap, clamp(clampedUv + vec2(tStep.x, 0.0), vec2(0.002), vec2(0.998))).a * 0.15
+                             + texture2D(uFowMap, clamp(clampedUv - vec2(tStep.x, 0.0), vec2(0.002), vec2(0.998))).a * 0.15
+                             + texture2D(uFowMap, clamp(clampedUv + vec2(0.0, tStep.y), vec2(0.002), vec2(0.998))).a * 0.15
+                             + texture2D(uFowMap, clamp(clampedUv - vec2(0.0, tStep.y), vec2(0.002), vec2(0.998))).a * 0.15;
+                    fA = mix(fA, 0.96, oobWeight);
+
+                    float fowIntensity = smoothstep(0.05, 0.92, fA);
+                    vec3 baseCol = gl_FragColor.rgb;
+                    float texLuma = dot(baseCol, vec3(0.299, 0.587, 0.114));
+                    vec3 coolTint = mix(baseCol, vec3(texLuma) * vec3(0.68, 0.78, 0.94), 0.45);
+
+                    // Explored memory state: clearly darkened (40% terrain, 36% static structures) so active vision stands out
+                    vec3 exploredCol = coolTint * (uIsBuilding > 0.5 ? 0.36 : 0.40);
+                    // Unexplored shroud state: deep tactical darkness while keeping faint terrain contour silhouette
+                    vec3 fogAtmosphere = vec3(0.045, 0.065, 0.105);
+                    if (uBiomeId > 3.5) fogAtmosphere = vec3(0.08, 0.035, 0.025);
+                    else if (uBiomeId > 2.5) fogAtmosphere = vec3(0.035, 0.065, 0.095);
+                    else if (uBiomeId > 1.5) fogAtmosphere = vec3(0.035, 0.065, 0.055);
+                    else if (uBiomeId > 0.5) fogAtmosphere = vec3(0.075, 0.055, 0.040);
+
+                    vec3 unexploredCol = mix(coolTint * 0.14, fogAtmosphere, 0.68);
+                    float exploredBand = smoothstep(0.08, 0.46, fowIntensity);
+                    float unexploredBand = smoothstep(0.60, 0.88, fowIntensity);
+
+                    vec3 afterExplored = mix(baseCol, exploredCol, exploredBand);
+                    vec3 finalFowCol = mix(afterExplored, unexploredCol, unexploredBand);
+
+                    // Subtle rim highlight along active vision perimeter
+                    float visionEdge = 4.0 * exploredBand * (1.0 - exploredBand);
+                    finalFowCol += vec3(0.04, 0.08, 0.14) * visionEdge * (0.35 + 0.65 * texLuma);
+
+                    // Far out-of-bounds horizon fade so distant skirt blends smoothly into biome skybox horizon
+                    float farHorizonFade = smoothstep(26.0, 210.0, oobDist);
+                    finalFowCol = mix(finalFowCol, fogAtmosphere * 0.85, farHorizonFade);
+
+                    if (uFowDebugMode > 0.5) {
+                        // Explicit FOW Debug Visualization: Green = Visible, Cyan = Explored, Deep Red/Purple = Unexplored
+                        vec3 dbgVis = mix(baseCol, vec3(0.15, 0.95, 0.35), 0.35);
+                        vec3 dbgExp = mix(exploredCol, vec3(0.12, 0.58, 0.96), 0.48);
+                        vec3 dbgUnexp = mix(unexploredCol, vec3(0.45, 0.06, 0.28), 0.55);
+                        vec3 dbgCol = mix(dbgVis, dbgExp, exploredBand);
+                        dbgCol = mix(dbgCol, dbgUnexp, unexploredBand);
+                        gl_FragColor.rgb = dbgCol;
+                    } else {
+                        float preserveLava = clamp(1.0 - lavaFissureGlow * 0.45, 0.35, 1.0);
+                        gl_FragColor.rgb = mix(baseCol, finalFowCol, clamp(exploredBand * preserveLava, 0.0, 0.94));
                     }
                 }`
             );
@@ -2980,9 +3019,20 @@ const SHADER_ENGINE = {
         if (window.WEATHER_SYSTEM) {
             window.WEATHER_SYSTEM.update(dt, timeSec);
         }
+        if (window.THRUST_FX_SYSTEM) {
+            window.THRUST_FX_SYSTEM.update(dt, timeSec);
+        }
     }
 };
 window.SHADER_ENGINE = SHADER_ENGINE;
+window.fowDebugMode = false;
+window.toggleFowDebugMode = function(forceState) {
+    window.fowDebugMode = typeof forceState === 'boolean' ? forceState : !window.fowDebugMode;
+    if (SHADER_ENGINE && SHADER_ENGINE.terrainUniforms && SHADER_ENGINE.terrainUniforms.uFowDebugMode) {
+        SHADER_ENGINE.terrainUniforms.uFowDebugMode.value = window.fowDebugMode ? 1.0 : 0.0;
+    }
+    return window.fowDebugMode;
+};
 
 window.pushWaterShaderRipple = function(wx, wz, strength = 1.0) {
     if (typeof window.isOnRiverBridge === 'function' && window.isOnRiverBridge(wx, wz, 0.85)) return;
@@ -4402,6 +4452,212 @@ const SHARED_FX_MAT = {
     mindHalo: createSimulatedBlastWaveMaterial(0xf43f5e),
     mindControlRing: createSimulatedBlastWaveMaterial(0xe879f9)
 };
+
+// ============================================================================
+// COMPLETE ENVIRONMENTAL & FACTION STRUCTURE MATERIALS (PREVENTS WHITE MESHES)
+// ============================================================================
+(function registerCompleteStructureMaterials() {
+    if (typeof MAT === 'undefined' || !MAT) return;
+    const extraMats = {
+        ruinSteelDark: new THREE.MeshStandardMaterial({ color: 0x2a313b, map: terranPlateTex, bumpMap: normalMap, bumpScale: 0.05, roughness: 0.58, metalness: 0.72 }),
+        bunkerMat: new THREE.MeshStandardMaterial({ color: 0x4b5563, map: terranPlateTex, bumpMap: normalMap, bumpScale: 0.05, roughness: 0.52, metalness: 0.65 }),
+        woodPlankMat: new THREE.MeshStandardMaterial({ color: 0x6b4c35, map: woodTex, bumpMap: woodTex, bumpScale: 0.04, roughness: 0.86, metalness: 0.06 }),
+        ruinConcrete: new THREE.MeshStandardMaterial({ color: 0x6c727a, map: concreteTex, bumpMap: concreteTex, bumpScale: 0.05, roughness: 0.88, metalness: 0.12 }),
+        ruinPlaster: new THREE.MeshStandardMaterial({ color: 0x8a8275, map: concreteTex, bumpMap: concreteTex, bumpScale: 0.04, roughness: 0.85, metalness: 0.08 }),
+        ruinBrick: new THREE.MeshStandardMaterial({ color: 0x7c4333, map: concreteTex, bumpMap: concreteTex, bumpScale: 0.05, roughness: 0.84, metalness: 0.10 }),
+        ruinSteel: new THREE.MeshStandardMaterial({ color: 0x475361, map: terranPlateTex, bumpMap: normalMap, bumpScale: 0.05, roughness: 0.50, metalness: 0.74 }),
+        steelMat: new THREE.MeshStandardMaterial({ color: 0x566373, map: terranPlateTex, bumpMap: normalMap, bumpScale: 0.04, roughness: 0.42, metalness: 0.78 }),
+        obsidianMat: new THREE.MeshStandardMaterial({ color: 0x1e222d, map: terrainDetailTex, bumpMap: normalMap, bumpScale: 0.05, roughness: 0.28, metalness: 0.45 }),
+        glassMat: new THREE.MeshStandardMaterial({ color: 0x5ab4d6, map: trimGlowTex, roughness: 0.18, metalness: 0.78, emissive: 0x0c2838, emissiveIntensity: 0.35 }),
+        water: new THREE.MeshStandardMaterial({ color: 0x1e5c82, map: terrainDetailTex, roughness: 0.22, metalness: 0.35 }),
+        mudBank: new THREE.MeshStandardMaterial({ color: 0x4a3b2c, map: terrainDetailTex, bumpMap: terrainDetailTex, bumpScale: 0.05, roughness: 0.92, metalness: 0.05 }),
+        foliagePine: new THREE.MeshStandardMaterial({ color: 0x2d4c2b, map: terrainDetailTex, roughness: 0.86, metalness: 0.04 }),
+        foliageBush: new THREE.MeshStandardMaterial({ color: 0x365b2d, map: terrainDetailTex, roughness: 0.88, metalness: 0.04 }),
+        mossRock: new THREE.MeshStandardMaterial({ color: 0x4b5842, map: terrainDetailTex, bumpMap: terrainDetailTex, bumpScale: 0.06, roughness: 0.88, metalness: 0.08 }),
+        hazardGlow: new THREE.MeshStandardMaterial({ color: 0xff8c1a, map: trimGlowTex, emissive: 0xd95f02, emissiveIntensity: 0.85, roughness: 0.28, metalness: 0.32 }),
+        canyonRock: new THREE.MeshStandardMaterial({ color: 0x7c5840, map: terrainDetailTex, bumpMap: terrainDetailTex, bumpScale: 0.06, roughness: 0.90, metalness: 0.08 }),
+        trunkMat: new THREE.MeshStandardMaterial({ color: 0x523a28, map: woodTex, bumpMap: woodTex, bumpScale: 0.05, roughness: 0.90, metalness: 0.05 }),
+        voidBlack: new THREE.MeshStandardMaterial({ color: 0x12151c, map: terranPlateTex, roughness: 0.75, metalness: 0.45 }),
+        silver: new THREE.MeshStandardMaterial({ color: 0x9aa6b5, map: terranPlateTex, bumpMap: normalMap, bumpScale: 0.03, roughness: 0.32, metalness: 0.84 }),
+        chrome: new THREE.MeshStandardMaterial({ color: 0xb0bccb, map: terranPlateTex, bumpMap: normalMap, bumpScale: 0.03, roughness: 0.24, metalness: 0.88 }),
+        terranWall: new THREE.MeshStandardMaterial({ color: 0x485464, map: terranPlateTex, bumpMap: normalMap, bumpScale: 0.05, roughness: 0.48, metalness: 0.72 }),
+        fleshTendon: new THREE.MeshStandardMaterial({ color: 0x6e2236, map: zergSkinTex, bumpMap: zergSkinTex, bumpScale: 0.05, roughness: 0.55, metalness: 0.14, emissive: 0x1e050d, emissiveIntensity: 0.25 }),
+        rock: new THREE.MeshStandardMaterial({ color: 0x5a5f66, map: terrainDetailTex, bumpMap: terrainDetailTex, bumpScale: 0.06, roughness: 0.88, metalness: 0.10 }),
+        crimson: new THREE.MeshStandardMaterial({ color: 0xb81d2a, map: terranPlateTex, emissive: 0x4a0810, emissiveIntensity: 0.35, roughness: 0.42, metalness: 0.58 }),
+        medivacHull: new THREE.MeshStandardMaterial({ color: 0xd8dee6, map: terranPlateTex, bumpMap: normalMap, bumpScale: 0.04, roughness: 0.38, metalness: 0.62 }),
+        medivacRed: new THREE.MeshStandardMaterial({ color: 0xc81e2b, map: terranPlateTex, bumpMap: normalMap, bumpScale: 0.03, roughness: 0.36, metalness: 0.48, emissive: 0x3a0508, emissiveIntensity: 0.22 }),
+        battlecruiserHull: new THREE.MeshStandardMaterial({ color: 0x3b4656, map: terranPlateTex, bumpMap: normalMap, bumpScale: 0.05, roughness: 0.42, metalness: 0.78 }),
+        battlecruiserDark: new THREE.MeshStandardMaterial({ color: 0x222934, map: terranPlateTex, bumpMap: normalMap, bumpScale: 0.05, roughness: 0.48, metalness: 0.82 })
+    };
+    Object.keys(extraMats).forEach((k) => {
+        const m = extraMats[k];
+        m.name = `MAT_${k}`;
+        MAT[k] = m;
+        if (window.SHADER_ENGINE) {
+            window.SHADER_ENGINE.applyBuildingShader(m);
+        }
+        if (window.REGISTER_RUNTIME_TEXTURE && m.map) {
+            window.REGISTER_RUNTIME_TEXTURE(`MAT.${k}.map`, m.map);
+        }
+    });
+})();
+
+// ============================================================================
+// WEBGL THRUST & PARTICLE EFFECT SYSTEM (Adapted from https://ics.media/en/entry/13973/)
+// Layered UV-scrolling cone mesh + additive outer shell + nozzle flare sprite
+// + delta-time pooled spark emitter for aircraft & missiles
+// ============================================================================
+(function initThrustFxSystem() {
+    // 1. Procedural longitudinal gradient + cellular plasma noise texture for UV scrolling along cone V-axis
+    const thrustPlumeTex = makeProceduralTexture((ctx, w, h) => {
+        const img = ctx.createImageData(w, h);
+        const d = img.data;
+        for (let y = 0; y < h; y++) {
+            const v = y / h; // 0 = nozzle tip, 1 = tail fadeout
+            const axialFade = Math.pow(Math.max(0, 1.0 - v), 1.35) * Math.min(1.0, v * 8.5);
+            for (let x = 0; x < w; x++) {
+                const u = (x / w) * Math.PI * 2;
+                const s1 = Math.sin(u * 3.0 + v * 18.0) * 0.5 + 0.5;
+                const s2 = Math.cos(u * 5.0 - v * 28.0 + Math.sin(u * 2.0) * 1.4) * 0.5 + 0.5;
+                const shockDiamond = Math.pow(Math.max(0, Math.cos(v * Math.PI * 6.0)), 2.2) * 0.38;
+                const streak = Math.min(1.0, (s1 * 0.52 + s2 * 0.48) * 0.85 + shockDiamond + 0.25);
+                const intensity = Math.min(1.0, axialFade * streak);
+                const idx = (y * w + x) * 4;
+                d[idx]     = Math.min(255, Math.round(intensity * 255));
+                d[idx + 1] = Math.min(255, Math.round(Math.pow(intensity, 1.15) * 245));
+                d[idx + 2] = Math.min(255, Math.round(Math.pow(intensity, 1.35) * 255));
+                d[idx + 3] = Math.min(255, Math.round(intensity * 255));
+            }
+        }
+        ctx.putImageData(img, 0, 0);
+    }, 1, 2, 'thrustPlumeTex');
+
+    // 2. Soft radial billboard flare texture for engine nozzle bloom
+    const thrustFlareTex = makeProceduralTexture((ctx, w, h) => {
+        const cx = w * 0.5, cy = h * 0.5, rMax = w * 0.5;
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, rMax);
+        grad.addColorStop(0.0, 'rgba(255, 255, 255, 1.0)');
+        grad.addColorStop(0.28, 'rgba(190, 235, 255, 0.85)');
+        grad.addColorStop(0.62, 'rgba(80, 175, 255, 0.32)');
+        grad.addColorStop(1.0, 'rgba(0, 0, 0, 0.0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+    }, 1, 1, 'thrustFlareTex');
+
+    const coreConeGeo = new THREE.CylinderGeometry(0.08, 0.24, 1.0, 12, 1, true);
+    coreConeGeo.translate(0, -0.5, 0);
+    coreConeGeo.rotateX(Math.PI / 2); // Extends along -Z local axis
+
+    const outerConeGeo = new THREE.CylinderGeometry(0.13, 0.38, 1.28, 12, 1, true);
+    outerConeGeo.translate(0, -0.64, 0);
+    outerConeGeo.rotateX(Math.PI / 2);
+
+    const activeAssemblies = new Set();
+
+    const THRUST_FX_SYSTEM = {
+        thrustPlumeTex,
+        thrustFlareTex,
+        activeAssemblies,
+        createThrusterAssembly(opts = {}) {
+            const coreColor = opts.coreColor !== undefined ? opts.coreColor : 0x7ce8ff;
+            const glowColor = opts.glowColor !== undefined ? opts.glowColor : 0x1e88ff;
+            const radius = opts.radius || 0.22;
+            const length = opts.length || 0.95;
+            const scrollSpeed = opts.scrollSpeed || 4.8;
+
+            const group = new THREE.Group();
+            group.name = opts.name || 'ThrusterPlumeAssembly';
+
+            const clonedTex = thrustPlumeTex.clone();
+            clonedTex.wrapS = THREE.RepeatWrapping;
+            clonedTex.wrapT = THREE.RepeatWrapping;
+            clonedTex.needsUpdate = true;
+
+            const coreMat = new THREE.MeshBasicMaterial({
+                color: coreColor,
+                map: clonedTex,
+                transparent: true,
+                opacity: 0.92,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                side: THREE.DoubleSide
+            });
+            const outerMat = new THREE.MeshBasicMaterial({
+                color: glowColor,
+                map: clonedTex,
+                transparent: true,
+                opacity: 0.48,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                side: THREE.DoubleSide
+            });
+
+            const coreMesh = new THREE.Mesh(coreConeGeo, coreMat);
+            coreMesh.scale.set(radius / 0.16, radius / 0.16, length);
+            group.add(coreMesh);
+
+            const outerMesh = new THREE.Mesh(outerConeGeo, outerMat);
+            outerMesh.scale.set(radius / 0.16, radius / 0.16, length * 1.15);
+            group.add(outerMesh);
+
+            const flareMat = new THREE.SpriteMaterial({
+                map: thrustFlareTex,
+                color: coreColor,
+                transparent: true,
+                opacity: 0.85,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+            const flareSprite = new THREE.Sprite(flareMat);
+            flareSprite.scale.set(radius * 3.1, radius * 3.1, 1.0);
+            group.add(flareSprite);
+
+            group.userData.isThrustAssembly = true;
+            group.userData.scrollTex = clonedTex;
+            group.userData.coreMesh = coreMesh;
+            group.userData.outerMesh = outerMesh;
+            group.userData.flareSprite = flareSprite;
+            group.userData.baseRadius = radius;
+            group.userData.baseLength = length;
+            group.userData.scrollSpeed = scrollSpeed;
+            group.userData.throttle = 1.0;
+            group.userData.phase = Math.random() * Math.PI * 2;
+
+            activeAssemblies.add(group);
+            return group;
+        },
+        setThrottle(group, throttle = 1.0) {
+            if (!group || !group.userData || !group.userData.isThrustAssembly) return;
+            group.userData.throttle = THREE.MathUtils.clamp(throttle, 0.25, 2.2);
+        },
+        update(dt = 0.016, timeSec = 0) {
+            const safeDt = Math.min(0.05, Math.max(0.001, dt));
+            activeAssemblies.forEach((grp) => {
+                if (!grp || !grp.parent) {
+                    activeAssemblies.delete(grp);
+                    return;
+                }
+                if (!grp.visible) return;
+                const ud = grp.userData;
+                if (ud.scrollTex) {
+                    ud.scrollTex.offset.y = (ud.scrollTex.offset.y - safeDt * ud.scrollSpeed * (0.8 + ud.throttle * 0.45)) % 1.0;
+                }
+                const pulse = 1.0 + 0.14 * Math.sin(timeSec * 28.0 + ud.phase) + 0.08 * Math.cos(timeSec * 43.0 - ud.phase);
+                const rScale = (ud.baseRadius / 0.16) * (0.85 + 0.18 * ud.throttle) * (0.94 + 0.06 * pulse);
+                const lScale = ud.baseLength * ud.throttle * pulse;
+                if (ud.coreMesh) ud.coreMesh.scale.set(rScale, rScale, lScale);
+                if (ud.outerMesh) ud.outerMesh.scale.set(rScale * 1.12, rScale * 1.12, lScale * 1.18);
+                if (ud.flareSprite) {
+                    const fs = ud.baseRadius * (2.8 + 0.55 * ud.throttle * pulse);
+                    ud.flareSprite.scale.set(fs, fs, 1.0);
+                }
+            });
+        }
+    };
+
+    window.THRUST_FX_SYSTEM = THRUST_FX_SYSTEM;
+})();
+
 
 
 
