@@ -239,7 +239,7 @@ export default function App() {
     subtitle: 'High-Altitude Tactical Sector-09 Overview',
     progress: 0
   });
-  const [cinematicViewMode, setCinematicViewMode] = useState<'auto' | 'birds_eye' | 'ground_operator'>('auto');
+  const [cinematicViewMode, setCinematicViewMode] = useState<'auto' | 'birds_eye' | 'team_a' | 'team_b' | 'ground_operator'>('auto');
   const [campaignDropdownOpen, setCampaignDropdownOpen] = useState<boolean>(false);
   const campaignHoldTimerRef = useRef<number | null>(null);
   const campaignHoldTriggeredRef = useRef<boolean>(false);
@@ -326,6 +326,9 @@ export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
+  if (typeof window !== 'undefined') {
+    (window as any).__STARBLOCK_PHASE__ = phase;
+  }
   const inGameChatOpenRef = useRef(inGameChatOpen);
   inGameChatOpenRef.current = inGameChatOpen;
 
@@ -455,7 +458,7 @@ export default function App() {
     if (window.SFX) window.SFX.playClick();
   }, []);
 
-  const handleChangeCinematicViewMode = useCallback((mode: 'auto' | 'birds_eye' | 'ground_operator') => {
+  const handleChangeCinematicViewMode = useCallback((mode: 'auto' | 'birds_eye' | 'team_a' | 'team_b' | 'ground_operator') => {
     setCinematicViewMode(mode);
     if ((window as any).GAME_API && typeof (window as any).GAME_API.setBattleCinematicViewMode === 'function') {
       (window as any).GAME_API.setBattleCinematicViewMode(mode);
@@ -1564,13 +1567,15 @@ export default function App() {
           ========================================================================= */}
       {phase === 'menu' && (
         <div className="fixed inset-0 pointer-events-none flex flex-col justify-between p-4 sm:p-7 z-40">
-          {/* Top-Right Minimal Skip / Cinematic Camera View Controls */}
-          <div className="flex items-center justify-end gap-1.5 pointer-events-auto">
-            <div className="flex items-center bg-[#060d17]/80 border border-[#2b4463] p-0.5 backdrop-blur-sm">
+          {/* Top-Right Spectator AI-vs-AI Camera Mode Controls */}
+          <div className="flex flex-wrap items-center justify-end gap-1.5 pointer-events-auto">
+            <div className="flex items-center bg-[#060d17]/85 border border-[#2b4463] p-0.5 backdrop-blur-sm">
               {([
-                { id: 'auto', label: 'AUTO CAM' },
-                { id: 'birds_eye', label: "BIRD'S-EYE" },
-                { id: 'ground_operator', label: 'GROUND CAM' }
+                { id: 'auto', label: 'AUTO' },
+                { id: 'birds_eye', label: 'OVERVIEW' },
+                { id: 'team_a', label: 'TEAM A' },
+                { id: 'team_b', label: 'TEAM B' },
+                { id: 'ground_operator', label: 'BATTLE' }
               ] as const).map(cm => (
                 <button
                   key={cm.id}

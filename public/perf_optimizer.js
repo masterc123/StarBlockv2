@@ -235,9 +235,9 @@
         }
     };
 
-    // Keyboard shortcut F9 to toggle telemetry overlay
+    // Keyboard shortcut F10 to toggle telemetry overlay (F9 is reserved for Error Monitor)
     window.addEventListener('keydown', (e) => {
-        if (e.key === 'F9') {
+        if (e.key === 'F10') {
             e.preventDefault();
             PERF_PROFILER.toggleHUD();
         }
@@ -528,6 +528,19 @@
                 }
             }
         });
+    }
+
+    // Preserve backwards-compatible methods expected by textures-scene.js and game.js callers
+    if (typeof PERF_PROFILER.getSummary !== 'function') {
+        PERF_PROFILER.getSummary = function getSummary() {
+            const rep = this.getReport();
+            return rep ? rep.subsystems : {};
+        };
+    }
+    if (typeof PERF_MANAGER.applyTier !== 'function') {
+        PERF_MANAGER.applyTier = function applyTier(tierName) {
+            return this.setPreset(tierName);
+        };
     }
 
     window.PERF_PROFILER = PERF_PROFILER;

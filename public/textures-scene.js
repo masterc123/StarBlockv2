@@ -1,4 +1,558 @@
 // ============================================================================
+// 0. EARLY GLOBAL ERROR MONITOR & DIAGNOSTIC CAPTURE (RUNS BEFORE ALL SCRIPTS)
+// ============================================================================
+(function initEarlyGlobalErrorMonitor() {
+    if (window.APP_ERROR_HANDLER && window.APP_ERROR_HANDLER.__v2Rebuilt) return;
+    const STORAGE_KEY = 'starblock_v2_error_log_v1';
+    let persistedLogs = [];
+    try {
+        const raw = window.sessionStorage.getItem(STORAGE_KEY) || window.localStorage.getItem(STORAGE_KEY);
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) persistedLogs = parsed.slice(-500);
+        }
+    } catch (_) {}
+
+    function parseStackLocation(stackStr, fallbackFile, fallbackLine, fallbackCol) {
+        const result = {
+            file: fallbackFile || 'unknown',
+            line: Number.isFinite(Number(fallbackLine)) ? Number(fallbackLine) : 0,
+            column: Number.isFinite(Number(fallbackCol)) ? Number(fallbackCol) : 0,
+            func: 'anonymous'
+        };
+        if (typeof stackStr === 'string' && stackStr.trim()) {
+            const lines = stackStr.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+                const ln = lines[i].trim();
+                if (!ln || ln.includes('initEarlyGlobalErrorMonitor') || ln.includes('APP_ERROR_HANDLER')) continue;
+                const matchWithFn = ln.match(/at\s+([^\s(]+)\s+\((?:.*\/)?([^/:()]+):(\d+):(\d+)\)/);
+                if (matchWithFn) {
+                    result.func = matchWithFn[1];
+                    result.file = matchWithFn[2];
+                    result.line = parseInt(matchWithFn[3], 10) || result.line;
+                    result.column = parseInt(matchWithFn[4], 10) || result.column;
+                    break;
+                }
+                const matchNoFn = ln.match(/(?:at\s+)?(?:.*\/)?([^/\s:()]+):(\d+):(\d+)/);
+                if (matchNoFn) {
+                    result.file = matchNoFn[1];
+                    result.line = parseInt(matchNoFn[2], 10) || result.line;
+                    result.column = parseInt(matchNoFn[3], 10) || result.column;
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+
+    function detectGameContext() {
+        let phase = 'initialization';
+        let lifecycleStage = 'initialization';
+        if (window.__STARBLOCK_PHASE__) {
+            phase = String(window.__STARBLOCK_PHASE__);
+        } else if (window.BATTLE_CINEMATIC && window.BATTLE_CINEMATIC.active) {
+            phase = 'menu_spectator';
+        } else if (typeof window.gameStarted !== 'undefined') {
+            phase = window.gameStarted ? 'playing' : 'menu';
+        }
+        if (phase === 'playing') lifecycleStage = 'gameplay';
+        else if (phase === 'menu' || phase === 'menu_spectator' || phase === 'multiplayer' || phase === 'lobby') lifecycleStage = 'menu';
+        else if (document.readyState === 'complete') lifecycleStage = 'menu';
+
+        let biome = 'koprulu';
+        try {
+            if (typeof window.getCurrentPlanetBiome === 'function') {
+                const b = window.getCurrentPlanetBiome();
+                if (b && b.id) biome = b.id;
+            } else if (window.CURRENT_PLANET_BIOME_ID) {
+                biome = window.CURRENT_PLANET_BIOME_ID;
+            }
+        } catch (_) {}
+
+        let mapSeed = 0;
+        try {
+            if (typeof window.ACTIVE_MAP_SEED === 'number') mapSeed = window.ACTIVE_MAP_SEED;
+        } catch (_) {}
+
+        return {
+            phase,
+            lifecycleStage,
+            biome,
+            mapSeed,
+            rendererActive: Boolean(window.renderer && window.renderer.domElement)
+        };
+    }
+
+    function classifyErrorCategory(contextStr, msgStr, severityStr) {
+        const combined = `${contextStr || ''} ${msgStr || ''}`.toLowerCase();
+        if (severityStr === 'warn' || severityStr === 'warning') return 'warnings';
+        if (combined.includes('resource') || combined.includes('<script') || combined.includes('<img') || combined.includes('<link') || combined.includes('audio') || combined.includes('404')) return 'resource';
+        if (combined.includes('webgl') || combined.includes('shader') || combined.includes('three') || combined.includes('texture') || combined.includes('material') || combined.includes('render') || combined.includes('shadow')) return 'graphics';
+        if (combined.includes('ai') || combined.includes('zerg') || combined.includes('spectator') || combined.includes('cinematic') || combined.includes('path') || combined.includes('nav')) return 'ai';
+        if (combined.includes('init') || combined.includes('bootstrap') || combined.includes('dependency') || combined.includes('load')) return 'initialization';
+        return 'errors';
+    }
+
+    const handler = {
+        __v2Rebuilt: true,
+        logs: persistedLogs,
+        maxLogs: 5000,
+        overlayEl: null,
+        pillEl: null,
+        activeFilter: 'all',
+        searchQuery: '',
+        expandedIds: {},
+        confirmingClear: false,
+
+        _persist() {
+            try {
+                const slice = this.logs.slice(-400);
+                const serialized = JSON.stringify(slice);
+                window.sessionStorage.setItem(STORAGE_KEY, serialized);
+                window.localStorage.setItem(STORAGE_KEY, serialized);
+            } catch (_) {}
+        },
+
+        getCounts() {
+            let errors = 0;
+            let warnings = 0;
+            let totalOccurrences = 0;
+            for (let i = 0; i < this.logs.length; i++) {
+                const item = this.logs[i];
+                const c = item.count || 1;
+                totalOccurrences += c;
+                if (item.severity === 'warn' || item.category === 'warnings') warnings += c;
+                else errors += c;
+            }
+            return { unique: this.logs.length, errors, warnings, totalOccurrences };
+        },
+
+        record(context, err, severity = 'error', extraMeta = null) {
+            try {
+                const nowIso = new Date().toISOString();
+                const nowTime = nowIso.slice(11, 23);
+                const msg = err && err.message ? String(err.message) : String(err ?? 'Unknown error');
+                const rawStack = err && err.stack ? String(err.stack) : (extraMeta && extraMeta.stack ? String(extraMeta.stack) : `${context}: ${msg}`);
+                const parsedLoc = parseStackLocation(
+                    rawStack,
+                    extraMeta && extraMeta.file,
+                    extraMeta && extraMeta.line,
+                    extraMeta && extraMeta.column
+                );
+                const gameCtx = detectGameContext();
+                const normSeverity = (severity === 'warn' || severity === 'warning') ? 'warn' : 'error';
+                const category = (extraMeta && extraMeta.category) || classifyErrorCategory(context, msg, normSeverity);
+                const affectedObject = (extraMeta && extraMeta.affectedObject) || null;
+                const dedupKey = `${normSeverity}|${context}|${msg}|${parsedLoc.file}:${parsedLoc.line}:${parsedLoc.column}`;
+
+                let existing = null;
+                for (let i = this.logs.length - 1; i >= 0; i--) {
+                    if (this.logs[i].dedupKey === dedupKey) {
+                        existing = this.logs[i];
+                        break;
+                    }
+                }
+
+                if (existing) {
+                    existing.count = (existing.count || 1) + 1;
+                    existing.lastSeenIso = nowIso;
+                    existing.lastSeenTime = nowTime;
+                    existing.gamePhase = gameCtx.phase;
+                    existing.lifecycleStage = gameCtx.lifecycleStage;
+                    existing.biome = gameCtx.biome;
+                    if (!existing.fullStack && rawStack) existing.fullStack = rawStack;
+                } else {
+                    const entry = {
+                        id: `err_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                        dedupKey,
+                        time: nowTime,
+                        firstSeenIso: nowIso,
+                        firstSeenTime: nowTime,
+                        lastSeenIso: nowIso,
+                        lastSeenTime: nowTime,
+                        context: String(context || 'runtime'),
+                        severity: normSeverity,
+                        category,
+                        message: msg,
+                        file: parsedLoc.file,
+                        line: parsedLoc.line,
+                        column: parsedLoc.column,
+                        func: parsedLoc.func,
+                        stack: rawStack.split('\n').slice(0, 6).join(' | '),
+                        fullStack: rawStack,
+                        count: 1,
+                        affectedObject,
+                        gamePhase: gameCtx.phase,
+                        lifecycleStage: gameCtx.lifecycleStage,
+                        biome: gameCtx.biome,
+                        mapSeed: gameCtx.mapSeed,
+                        rendererActive: gameCtx.rendererActive
+                    };
+                    if (this.logs.length >= this.maxLogs) {
+                        this.logs.shift();
+                    }
+                    this.logs.push(entry);
+                }
+
+                this._persist();
+                this.updateStatusPill();
+                if (this.overlayEl && this.overlayEl.style.display !== 'none') {
+                    this.renderDiagnosticOverlay();
+                }
+            } catch (_) {}
+        },
+
+        ensureStatusPill() {
+            if (!document.body) return null;
+            if (!this.pillEl) {
+                const pill = document.createElement('button');
+                pill.id = 'starblock-error-monitor-pill';
+                pill.type = 'button';
+                pill.title = 'Open StarBlock Error Monitor (Shortcut: F9)';
+                pill.style.cssText = 'position:fixed;bottom:10px;right:10px;z-index:2147483646;display:flex;align-items:center;gap:6px;padding:5px 10px;border-radius:6px;font:700 10px/1.2 monospace;letter-spacing:0.06em;cursor:pointer;pointer-events:auto;box-shadow:0 4px 14px rgba(0,0,0,0.65);transition:transform 0.15s ease,background 0.2s ease;';
+                pill.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.toggleDiagnosticOverlay();
+                });
+                document.body.appendChild(pill);
+                this.pillEl = pill;
+            }
+            this.updateStatusPill();
+            return this.pillEl;
+        },
+
+        updateStatusPill() {
+            if (!document.body) return;
+            if (!this.pillEl) {
+                this.ensureStatusPill();
+                return;
+            }
+            const counts = this.getCounts();
+            if (counts.errors > 0) {
+                this.pillEl.style.background = 'rgba(68, 12, 22, 0.94)';
+                this.pillEl.style.border = '1px solid #ff4d6d';
+                this.pillEl.style.color = '#ffd6de';
+                this.pillEl.textContent = `ERR: ${counts.errors} | WARN: ${counts.warnings} [F9]`;
+            } else if (counts.warnings > 0) {
+                this.pillEl.style.background = 'rgba(64, 46, 10, 0.92)';
+                this.pillEl.style.border = '1px solid #f59e0b';
+                this.pillEl.style.color = '#fef3c7';
+                this.pillEl.textContent = `ERR: 0 | WARN: ${counts.warnings} [F9]`;
+            } else {
+                this.pillEl.style.background = 'rgba(8, 26, 36, 0.85)';
+                this.pillEl.style.border = '1px solid rgba(56, 189, 248, 0.45)';
+                this.pillEl.style.color = '#7dd3fc';
+                this.pillEl.textContent = 'DIAG: 0 ERR [F9]';
+            }
+        },
+
+        clearHistory() {
+            this.logs.length = 0;
+            this.expandedIds = {};
+            this.confirmingClear = false;
+            try {
+                window.sessionStorage.removeItem(STORAGE_KEY);
+                window.localStorage.removeItem(STORAGE_KEY);
+            } catch (_) {}
+            this.updateStatusPill();
+            this.renderDiagnosticOverlay();
+        },
+
+        exportJsonReport() {
+            const report = {
+                generatedAt: new Date().toISOString(),
+                counts: this.getCounts(),
+                gameContext: detectGameContext(),
+                dependencyValidation: window.ENGINE_DEPENDENCY_VALIDATOR ? window.ENGINE_DEPENDENCY_VALIDATOR.lastReport : null,
+                logs: this.logs
+            };
+            const json = JSON.stringify(report, null, 2);
+            try {
+                const blob = new Blob([json], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `starblock-diagnostics-${Date.now()}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(url), 2000);
+            } catch (_) {}
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(json).catch(() => {});
+            }
+            return json;
+        },
+
+        captureError(errOrMsg, meta = {}) {
+            const ctx = (meta && (meta.context || meta.category)) || 'runtime';
+            const sev = (meta && meta.severity) || 'error';
+            return this.record(ctx, errOrMsg, sev, meta);
+        },
+
+        getEntries() {
+            return this.logs;
+        },
+
+        get overlayVisible() {
+            return Boolean(this.overlayEl && this.overlayEl.style.display !== 'none');
+        },
+
+        toggleDiagnosticOverlay() {
+            if (!document.body) return;
+            if (!this.overlayEl) {
+                const el = document.createElement('div');
+                el.id = 'rts-error-diag-overlay';
+                el.style.cssText = 'position:fixed;top:48px;right:14px;width:min(680px,95vw);max-height:82vh;background:rgba(6,12,20,0.97);border:1px solid #00e5ff;border-radius:10px;z-index:2147483647;color:#e0f7fa;font:11px/1.45 monospace;padding:12px;display:none;flex-direction:column;gap:8px;box-shadow:0 16px 48px rgba(0,0,0,0.9);pointer-events:auto;';
+                document.body.appendChild(el);
+                this.overlayEl = el;
+            }
+            const isHidden = this.overlayEl.style.display === 'none';
+            this.overlayEl.style.display = isHidden ? 'flex' : 'none';
+            if (isHidden) this.renderDiagnosticOverlay();
+        },
+
+        renderDiagnosticOverlay() {
+            if (!this.overlayEl) return;
+            const el = this.overlayEl;
+            while (el.firstChild) el.removeChild(el.firstChild);
+
+            const counts = this.getCounts();
+            const ctx = detectGameContext();
+            const fps = (window.PERF_MANAGER && window.PERF_MANAGER.rollingFps) ? Math.round(window.PERF_MANAGER.rollingFps) : '--';
+            const tier = (window.PERF_MANAGER && window.PERF_MANAGER.tier) ? window.PERF_MANAGER.tier : 'auto';
+
+            // Header bar
+            const header = document.createElement('div');
+            header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;border-bottom:1px solid rgba(0,229,255,0.28);padding-bottom:8px;';
+
+            const titleBox = document.createElement('div');
+            const titleText = document.createElement('div');
+            titleText.style.cssText = 'font-weight:700;font-size:12px;color:#38bdf8;';
+            titleText.textContent = `STARBLOCK DIAGNOSTICS MONITOR [F9] — ${counts.errors} ERR / ${counts.warnings} WARN (${counts.unique} unique)`;
+            const subText = document.createElement('div');
+            subText.style.cssText = 'font-size:10px;color:#94a3b8;';
+            subText.textContent = `Phase: ${ctx.phase} (${ctx.lifecycleStage}) | Biome: ${ctx.biome} | FPS: ${fps} | Tier: ${tier}`;
+            titleBox.appendChild(titleText);
+            titleBox.appendChild(subText);
+            header.appendChild(titleBox);
+
+            const btnGroup = document.createElement('div');
+            btnGroup.style.cssText = 'display:flex;gap:5px;flex-wrap:wrap;';
+
+            const makeBtn = (label, bg, border, color, onClick) => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.textContent = label;
+                b.style.cssText = `background:${bg};color:${color};border:1px solid ${border};padding:3px 8px;border-radius:4px;cursor:pointer;font:700 10px monospace;`;
+                b.addEventListener('click', onClick);
+                return b;
+            };
+
+            btnGroup.appendChild(makeBtn('COPY ALL', '#093447', '#00e5ff', '#a5f3fc', () => {
+                const payload = JSON.stringify(this.logs, null, 2);
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(payload).catch(() => {});
+                }
+            }));
+
+            btnGroup.appendChild(makeBtn('EXPORT JSON', '#0b3b2e', '#10b981', '#a7f3d0', () => {
+                this.exportJsonReport();
+            }));
+
+            if (!this.confirmingClear) {
+                btnGroup.appendChild(makeBtn('CLEAR', '#3b1c0b', '#f59e0b', '#fde68a', () => {
+                    this.confirmingClear = true;
+                    this.renderDiagnosticOverlay();
+                }));
+            } else {
+                btnGroup.appendChild(makeBtn('CONFIRM CLEAR?', '#5c111f', '#ff4d6d', '#fecdd3', () => {
+                    this.clearHistory();
+                }));
+                btnGroup.appendChild(makeBtn('CANCEL', '#1e293b', '#64748b', '#cbd5e1', () => {
+                    this.confirmingClear = false;
+                    this.renderDiagnosticOverlay();
+                }));
+            }
+
+            btnGroup.appendChild(makeBtn('CLOSE [F9]', '#421020', '#ff3b5c', '#fecdd3', () => {
+                this.overlayEl.style.display = 'none';
+            }));
+
+            header.appendChild(btnGroup);
+            el.appendChild(header);
+
+            // Filter & Search bar
+            const filterRow = document.createElement('div');
+            filterRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;';
+
+            const filterTabs = document.createElement('div');
+            filterTabs.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;';
+            const categories = ['all', 'errors', 'warnings', 'graphics', 'ai', 'initialization', 'resource'];
+            categories.forEach((cat) => {
+                const active = this.activeFilter === cat;
+                const tab = makeBtn(
+                    cat.toUpperCase(),
+                    active ? '#0284c7' : 'rgba(15,23,42,0.85)',
+                    active ? '#38bdf8' : '#334155',
+                    active ? '#ffffff' : '#94a3b8',
+                    () => {
+                        this.activeFilter = cat;
+                        this.renderDiagnosticOverlay();
+                    }
+                );
+                filterTabs.appendChild(tab);
+            });
+            filterRow.appendChild(filterTabs);
+
+            const searchInput = document.createElement('input');
+            searchInput.type = 'search';
+            searchInput.placeholder = 'Search message, file, stack...';
+            searchInput.value = this.searchQuery;
+            searchInput.style.cssText = 'background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:3px 8px;font:10px monospace;min-width:170px;';
+            searchInput.addEventListener('input', (ev) => {
+                this.searchQuery = ev.target.value || '';
+                this.renderDiagnosticOverlay();
+            });
+            filterRow.appendChild(searchInput);
+            el.appendChild(filterRow);
+
+            // Log list container
+            const listContainer = document.createElement('div');
+            listContainer.style.cssText = 'overflow-y:auto;max-height:60vh;display:flex;flex-direction:column;gap:6px;padding-right:4px;';
+
+            const q = this.searchQuery.trim().toLowerCase();
+            const filtered = this.logs.slice().reverse().filter((item) => {
+                if (this.activeFilter === 'errors' && item.severity === 'warn') return false;
+                if (this.activeFilter === 'warnings' && item.severity !== 'warn') return false;
+                if (this.activeFilter !== 'all' && this.activeFilter !== 'errors' && this.activeFilter !== 'warnings') {
+                    if (item.category !== this.activeFilter) return false;
+                }
+                if (q) {
+                    const hay = `${item.context} ${item.message} ${item.file} ${item.func} ${item.fullStack}`.toLowerCase();
+                    if (!hay.includes(q)) return false;
+                }
+                return true;
+            });
+
+            if (filtered.length === 0) {
+                const empty = document.createElement('div');
+                empty.style.cssText = 'padding:14px;color:#80cbc4;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:6px;';
+                empty.textContent = this.logs.length === 0
+                    ? '0 runtime errors or warnings recorded across initialization, menu, spectator cinematic, and gameplay.'
+                    : 'No log entries match the active filter/search.';
+                listContainer.appendChild(empty);
+            } else {
+                filtered.forEach((item) => {
+                    const card = document.createElement('div');
+                    const isWarn = item.severity === 'warn';
+                    card.style.cssText = `padding:8px;border-radius:6px;background:${isWarn ? 'rgba(69,42,10,0.42)' : 'rgba(64,12,24,0.45)'};border:1px solid ${isWarn ? 'rgba(245,158,11,0.45)' : 'rgba(244,63,94,0.45)'};display:flex;flex-direction:column;gap:4px;`;
+
+                    const topLine = document.createElement('div');
+                    topLine.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;';
+
+                    const metaLeft = document.createElement('div');
+                    metaLeft.style.cssText = `font-weight:700;color:${isWarn ? '#fcd34d' : '#fda4af'};`;
+                    metaLeft.textContent = `[${item.category.toUpperCase()}] ${item.context} — ${item.file}:${item.line}:${item.column} (${item.func}) ×${item.count || 1}`;
+                    topLine.appendChild(metaLeft);
+
+                    const metaRight = document.createElement('div');
+                    metaRight.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:10px;color:#94a3b8;';
+                    const timeSpan = document.createElement('span');
+                    timeSpan.textContent = item.count > 1
+                        ? `first ${item.firstSeenTime} / last ${item.lastSeenTime} | ${item.lifecycleStage}`
+                        : `${item.firstSeenTime} | ${item.lifecycleStage}`;
+                    metaRight.appendChild(timeSpan);
+
+                    const expandBtn = makeBtn(
+                        this.expandedIds[item.id] ? 'HIDE STACK' : 'STACK',
+                        '#0f172a',
+                        '#334155',
+                        '#93c5fd',
+                        () => {
+                            this.expandedIds[item.id] = !this.expandedIds[item.id];
+                            this.renderDiagnosticOverlay();
+                        }
+                    );
+                    metaRight.appendChild(expandBtn);
+
+                    const copyOneBtn = makeBtn('COPY', '#0f172a', '#334155', '#a5f3fc', () => {
+                        if (navigator.clipboard && navigator.clipboard.writeText) {
+                            navigator.clipboard.writeText(JSON.stringify(item, null, 2)).catch(() => {});
+                        }
+                    });
+                    metaRight.appendChild(copyOneBtn);
+
+                    topLine.appendChild(metaRight);
+                    card.appendChild(topLine);
+
+                    const msgDiv = document.createElement('div');
+                    msgDiv.style.cssText = 'color:#f8fafc;word-break:break-word;font-weight:600;';
+                    msgDiv.textContent = item.message;
+                    card.appendChild(msgDiv);
+
+                    if (this.expandedIds[item.id]) {
+                        const stackPre = document.createElement('pre');
+                        stackPre.style.cssText = 'margin:4px 0 0 0;padding:6px;background:rgba(2,6,23,0.85);border:1px solid #1e293b;border-radius:4px;color:#cbd5e1;font-size:10px;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow-y:auto;';
+                        stackPre.textContent = item.fullStack || item.stack || 'No stack trace available';
+                        card.appendChild(stackPre);
+                    }
+
+                    listContainer.appendChild(card);
+                });
+            }
+
+            el.appendChild(listContainer);
+        }
+    };
+
+    window.APP_ERROR_HANDLER = handler;
+
+    // 1. Capture-phase listener for resource load failures (<script>, <link>, <img>, <audio>)
+    window.addEventListener('error', (ev) => {
+        const t = ev && ev.target;
+        if (t && t !== window && (t.tagName === 'SCRIPT' || t.tagName === 'LINK' || t.tagName === 'IMG' || t.tagName === 'AUDIO')) {
+            const url = t.src || t.href || 'unknown_resource';
+            handler.record(`resource.${t.tagName.toLowerCase()}`, new Error(`Failed to load ${t.tagName} resource: ${url}`), 'error', {
+                category: 'resource',
+                file: url,
+                affectedObject: t.tagName
+            });
+            return;
+        }
+        if (ev && (ev.error || ev.message)) {
+            handler.record('window.onerror', ev.error || new Error(ev.message), 'error', {
+                file: ev.filename,
+                line: ev.lineno,
+                column: ev.colno,
+                stack: ev.error && ev.error.stack ? ev.error.stack : `${ev.message} at ${ev.filename}:${ev.lineno}:${ev.colno}`
+            });
+        }
+    }, true);
+
+    // 2. Unhandled Promise Rejections
+    window.addEventListener('unhandledrejection', (ev) => {
+        const reason = ev && ev.reason ? ev.reason : new Error('Unhandled promise rejection');
+        handler.record('unhandledrejection', reason instanceof Error ? reason : new Error(String(reason)), 'error');
+    });
+
+    // 3. Single Centralized F9 Shortcut (works in every phase: menu, spectator, multiplayer, gameplay)
+    window.addEventListener('keydown', (ev) => {
+        if (ev && ev.key === 'F9') {
+            if (typeof ev.preventDefault === 'function') ev.preventDefault();
+            if (typeof ev.stopPropagation === 'function') ev.stopPropagation();
+            handler.toggleDiagnosticOverlay();
+        }
+    }, true);
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => handler.ensureStatusPill());
+    } else {
+        handler.ensureStatusPill();
+    }
+})();
+
+// ============================================================================
 // 1. CUSTOM SVG EMBLEMS, HIGH-RES PBR TEXTURES & ZERO-LEAK SHARED FX POOLS
 // ============================================================================
 const HUMAN_SVG_ICON = `<svg viewBox="0 0 32 32" fill="none"><path d="M16 2L4 7v9c0 7.4 5.1 13.8 12 15.5C22.9 29.8 28 23.4 28 16V7L16 2z" stroke="#00e5ff" stroke-width="2" fill="rgba(0,229,255,0.18)"/><path d="M16 7l-8 8h5v9h6v-9h5l-8-8z" fill="#ffaa00"/></svg>`;
@@ -1766,13 +2320,14 @@ window.RAID_MUSIC = RAID_MUSIC;
 });
 
 // Calibrated StarCraft II Three-Point RTS Studio Lighting Rig:
-// 1. Key Light: Warm Koprulu Sun with 2048x2048 Soft Shadows
+// 1. Key Light: Warm Koprulu Sun with Soft PCF Shadows & Tuned Shadow Bias
 // 2. Fill Light: Cool Sky / Warm Canyon Ground Hemisphere Ambient
 // 3. Rim Light: High-Contrast Cool Backlight for Unit Silhouette Separation
-const hemiLight = new THREE.HemisphereLight(0x98c6ec, 0x384d38, 0.86);
+// 4. Ground Bounce Fill: Subtle Warm Uplight for Metallic Specular Readability
+const hemiLight = new THREE.HemisphereLight(0xa2cef2, 0x3d523b, 0.90);
 scene.add(hemiLight);
 
-const dirLight = new THREE.DirectionalLight(0xfff2de, 1.22);
+const dirLight = new THREE.DirectionalLight(0xfff4e2, 1.28);
 dirLight.position.set(58, 96, 48);
 dirLight.castShadow = true;
 const _initialShadowMapRes = (window.PERF_MANAGER && window.PERF_MANAGER.current)
@@ -1785,13 +2340,59 @@ dirLight.shadow.camera.left = -d; dirLight.shadow.camera.right = d;
 dirLight.shadow.camera.top = d; dirLight.shadow.camera.bottom = -d;
 dirLight.shadow.camera.near = 10;
 dirLight.shadow.camera.far = 230;
-dirLight.shadow.bias = -0.00035;
-dirLight.shadow.normalBias = 0.014;
+dirLight.shadow.bias = -0.00032;
+dirLight.shadow.normalBias = 0.012;
+dirLight.shadow.radius = IS_MOBILE ? 1.0 : 2.0;
 scene.add(dirLight);
 
-const rimLight = new THREE.DirectionalLight(0x6eb6ff, 0.52);
+const rimLight = new THREE.DirectionalLight(0x74beff, 0.56);
 rimLight.position.set(-64, 52, -56);
 scene.add(rimLight);
+
+const bounceFillLight = new THREE.DirectionalLight(0xffcf96, 0.22);
+bounceFillLight.position.set(20, -45, 25);
+scene.add(bounceFillLight);
+
+window.hemiLight = hemiLight;
+window.dirLight = dirLight;
+window.rimLight = rimLight;
+window.bounceFillLight = bounceFillLight;
+window.SYNC_BIOME_LIGHTING_RIG = function syncBiomeLightingRig(biomeId) {
+    const id = String(biomeId || 'koprulu').toLowerCase();
+    if (id === 'char_volcanic' || id === 'volcanic' || id === 'char') {
+        hemiLight.color.setHex(0xffb48a);
+        hemiLight.groundColor.setHex(0x4a1d12);
+        hemiLight.intensity = 0.84;
+        dirLight.color.setHex(0xffd7b0);
+        dirLight.intensity = 1.32;
+        rimLight.color.setHex(0xff6b3d);
+        rimLight.intensity = 0.62;
+    } else if (id === 'kaldir_ice' || id === 'ice' || id === 'kaldir') {
+        hemiLight.color.setHex(0xd4f1ff);
+        hemiLight.groundColor.setHex(0x46637a);
+        hemiLight.intensity = 0.96;
+        dirLight.color.setHex(0xf0f9ff);
+        dirLight.intensity = 1.24;
+        rimLight.color.setHex(0x38bdf8);
+        rimLight.intensity = 0.60;
+    } else if (id === 'shakuras_twilight' || id === 'void' || id === 'shakuras') {
+        hemiLight.color.setHex(0x93c5fd);
+        hemiLight.groundColor.setHex(0x1e293b);
+        hemiLight.intensity = 0.82;
+        dirLight.color.setHex(0xdbeafe);
+        dirLight.intensity = 1.18;
+        rimLight.color.setHex(0x818cf8);
+        rimLight.intensity = 0.64;
+    } else {
+        hemiLight.color.setHex(0xa2cef2);
+        hemiLight.groundColor.setHex(0x3d523b);
+        hemiLight.intensity = 0.90;
+        dirLight.color.setHex(0xfff4e2);
+        dirLight.intensity = 1.28;
+        rimLight.color.setHex(0x74beff);
+        rimLight.intensity = 0.56;
+    }
+};
 
 // ============================================================================
 // 2B. ADVANCED CUSTOM GLSL SHADER ENGINE (FLAME, BOMB, WATER, TERRAIN & FORCEFIELD)
@@ -4456,6 +5057,32 @@ const SHARED_FX_MAT = {
 // ============================================================================
 // COMPLETE ENVIRONMENTAL & FACTION STRUCTURE MATERIALS (PREVENTS WHITE MESHES)
 // ============================================================================
+const terranPlateTex = window.registerGameTexture('terranPlateTex', metalTex, false);
+const normalMap = window.registerGameTexture('normalMap', metalNormalTex, true);
+const concreteTex = window.registerGameTexture('concreteTex', terrainDetailTex, false);
+const zergSkinTex = window.registerGameTexture('zergSkinTex', zergChitinTex, false);
+const woodTex = window.registerGameTexture('woodTex', makeProceduralTexture((ctx, w, h) => {
+    ctx.fillStyle = '#5c4028';
+    ctx.fillRect(0, 0, w, h);
+    for (let y = 0; y < h; y += 8) {
+        ctx.fillStyle = (y % 16 === 0) ? 'rgba(32,18,8,0.42)' : 'rgba(120,86,54,0.28)';
+        ctx.fillRect(0, y, w, 3);
+    }
+    for (let i = 0; i < 180; i++) {
+        ctx.fillStyle = (i % 2 === 0) ? 'rgba(24,14,6,0.25)' : 'rgba(150,110,72,0.20)';
+        ctx.fillRect((i * 37) % w, (i * 19) % h, 24, 2);
+    }
+}, 2, 2, 128), false);
+const trimGlowTex = window.registerGameTexture('trimGlowTex', makeProceduralTexture((ctx, w, h) => {
+    const grad = ctx.createLinearGradient(0, 0, w, h);
+    grad.addColorStop(0, '#0ea5e9');
+    grad.addColorStop(0.5, '#38bdf8');
+    grad.addColorStop(1, '#0284c7');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+}, 1, 1, 64), false);
+window.REGISTER_RUNTIME_TEXTURE = window.registerGameTexture;
+
 (function registerCompleteStructureMaterials() {
     if (typeof MAT === 'undefined' || !MAT) return;
     const extraMats = {

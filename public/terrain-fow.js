@@ -187,6 +187,8 @@ window.getBaseZoneRampMetrics = getBaseZoneRampMetrics;
 
 const RIVER_HALF_WIDTH = 3.35;
 const RIVER_WATER_Y = -0.20;
+const WATER_LEVEL = RIVER_WATER_Y;
+window.WATER_LEVEL = WATER_LEVEL;
 const RIVER_BRIDGES = [];
 window.RIVER_BRIDGES = RIVER_BRIDGES;
 
@@ -14305,7 +14307,7 @@ const TERRAIN_CLASSIFIER = {
         }
 
         addMapMesh(group);
-        registerObstacle(wx, wz, 3.6);
+        obstacles.push({ x: wx, z: wz, r: 3.6 });
         DESTRUCTIBLE_ENV_STRUCTURES.push({
             kind: 'building',
             x: wx,
@@ -14592,6 +14594,9 @@ const BIOME_SKYBOX_SYSTEM = {
             if (!this.mesh.parent && typeof scene !== 'undefined' && scene) {
                 scene.add(this.mesh);
             }
+        }
+        if (typeof window.SYNC_BIOME_LIGHTING_RIG === 'function') {
+            window.SYNC_BIOME_LIGHTING_RIG(biome || ACTIVE_PLANET_BIOME || 'highland');
         }
         return this.mesh;
     },
