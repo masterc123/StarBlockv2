@@ -6213,6 +6213,7 @@ function createVehicleModel(vType) {
         // 4. Broadside Armored Sponsons & 4 Articulated Dual-Laser Turret Batteries
         const laserTurrets = [];
         const laserMuzzles = [];
+        const laserMuzzleFlashes = [];
         [-1.36, 1.36].forEach((bx, sideIdx) => {
             const sponsonWing = new THREE.Mesh(createExtrudedArmorHullGeo(1.22, 0.44, 2.38, 0.08, 0.22), hullMat);
             sponsonWing.position.set(bx, -0.02, -0.18);
@@ -6220,21 +6221,42 @@ function createVehicleModel(vType) {
             wingTrim.position.set(bx, 0.18, -0.18);
             airframe.add(sponsonWing, wingTrim);
 
-            [-0.65, 0.55].forEach((tz) => {
+            [-0.65, 0.55].forEach((tz, zIdx) => {
+                const mountIndex = sideIdx * 2 + zIdx;
                 const tPivot = new THREE.Group();
+                tPivot.name = `bc_laser_turret_${mountIndex}`;
                 tPivot.position.set(bx * 0.95, 0.28, tz);
-                const tDome = new THREE.Mesh(createSculptedArmorDomeGeo(0.18, 12, 10), darkMat);
-                const bLeft = new THREE.Mesh(createSculptedLatheBarrelGeo(0.032, 0.032, 0.48, 8), MAT.silver || hullMat);
+                const tDome = new THREE.Mesh(createSculptedArmorDomeGeo(0.20, 12, 10), darkMat);
+                const bLeft = new THREE.Mesh(createSculptedLatheBarrelGeo(0.036, 0.036, 0.52, 8), MAT.silver || hullMat);
                 bLeft.rotation.x = Math.PI / 2;
-                bLeft.position.set(-0.06, 0.06, 0.24);
+                bLeft.position.set(-0.065, 0.06, 0.26);
                 const bRight = bLeft.clone();
-                bRight.position.x = 0.06;
+                bRight.position.x = 0.065;
+                const emitterRing = new THREE.Mesh(createSculptedArmorDomeGeo(0.065, 8, 8), MAT.orangeGlow || MAT.cyanGlow);
+                emitterRing.position.set(0, 0.06, 0.50);
                 const lMuzzle = new THREE.Object3D();
-                lMuzzle.position.set(0, 0.06, 0.52);
-                tPivot.add(tDome, bLeft, bRight, lMuzzle);
+                lMuzzle.name = `bc_laser_muzzle_${mountIndex}`;
+                lMuzzle.position.set(0, 0.06, 0.56);
+                const muzzleFlashMesh = new THREE.Mesh(
+                    createSculptedArmorDomeGeo(0.14, 10, 8),
+                    new THREE.MeshBasicMaterial({ color: 0xffaa33, transparent: true, opacity: 0.92, blending: THREE.AdditiveBlending, depthWrite: false })
+                );
+                muzzleFlashMesh.position.copy(lMuzzle.position);
+                muzzleFlashMesh.scale.setScalar(0.01);
+                muzzleFlashMesh.visible = false;
+                tPivot.add(tDome, bLeft, bRight, emitterRing, lMuzzle, muzzleFlashMesh);
+                tPivot.userData = {
+                    mountIndex,
+                    muzzle: lMuzzle,
+                    muzzleFlash: muzzleFlashMesh,
+                    hasIndependentTarget: false,
+                    targetWorldPos: new THREE.Vector3(),
+                    flashTimer: 0
+                };
                 airframe.add(tPivot);
                 laserTurrets.push(tPivot);
                 laserMuzzles.push(lMuzzle);
+                laserMuzzleFlashes.push(muzzleFlashMesh);
             });
         });
 
@@ -9434,12 +9456,24 @@ function updateUnitAnimation(mesh, dt, isMoving, aimTargetPos = null) {
             if (ud.laserTurrets && ud.laserTurrets.length > 0) {
                 for (let li = 0; li < ud.laserTurrets.length; li++) {
                     const lt = ud.laserTurrets[li];
-                    if (aimTargetPos) {
-                        const localAim = ud.airframe.worldToLocal(_animLocalAimScratch.copy(aimTargetPos));
+                    const tData = lt.userData || {};
+                    const indTarget = (tData.hasIndependentTarget && tData.targetWorldPos) ? tData.targetWorldPos : aimTargetPos;
+                    if (indTarget) {
+                        const localAim = ud.airframe.worldToLocal(_animLocalAimScratch.copy(indTarget));
                         const desiredYaw = Math.atan2(localAim.x - lt.position.x, localAim.z - lt.position.z);
-                        lt.rotation.y = THREE.MathUtils.lerp(lt.rotation.y, desiredYaw, Math.min(1, effDt * 10));
+                        lt.rotation.y = THREE.MathUtils.lerp(lt.rotation.y, desiredYaw, Math.min(1, effDt * 14));
                     } else {
                         lt.rotation.y = THREE.MathUtils.lerp(lt.rotation.y, 0, Math.min(1, effDt * 4));
+                    }
+                    if (tData.muzzleFlash) {
+                        if (tData.flashTimer > 0) {
+                            tData.flashTimer = Math.max(0, tData.flashTimer - effDt);
+                            tData.muzzleFlash.visible = true;
+                            const fScale = 0.65 + (tData.flashTimer / 0.12) * 0.95;
+                            tData.muzzleFlash.scale.set(fScale, fScale, fScale * 1.45);
+                        } else {
+                            tData.muzzleFlash.visible = false;
+                        }
                     }
                 }
             }

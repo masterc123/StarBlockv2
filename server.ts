@@ -19,7 +19,7 @@ interface LobbyPlayer {
   isHost: boolean;
   isAi: boolean;
   aiDifficulty?: 'Easy' | 'Medium' | 'Hard' | 'Brutal';
-  team: 1 | 2 | 0; // 0 = FFA
+  team: 1 | 2 | 3 | 4 | 0; // 0 = FFA
   faction: 'Terran Dominion' | 'Zerg Swarm' | 'Protoss Fleet' | 'Protoss Solaris';
   ping: number;
   ready: boolean;
@@ -35,12 +35,15 @@ interface ChatMessageEntry {
   team?: number;
 }
 
+type LobbyGameMode = '1v1' | '1v2' | '1v3' | '2v2' | 'ffa' | 'custom' | 'team_ai' | 'deathmatch';
+
 interface MultiplayerLobby {
   id: string;
   name: string;
   hostName: string;
   hostId: string;
-  mode: 'team_ai' | 'deathmatch' | '2v2' | 'ffa';
+  mode: LobbyGameMode;
+  mapBiome: 'highland' | 'desert' | 'ocean' | 'lava' | 'jungle' | 'random';
   mapName: string;
   maxPlayers: number;
   ping: number;
@@ -56,6 +59,15 @@ interface LeaverPenaltyRecord {
   reason: string;
 }
 
+const BIOME_MAP_NAMES: Record<string, string> = {
+  highland: 'Koprulu Highland Pass',
+  ocean: 'Oceanic Archipelago',
+  lava: 'Char Volcanic Rift',
+  jungle: 'Bel\'Shir Jungle Basin',
+  desert: 'Mar Sara Arid Wastes',
+  random: 'Random Frontier Sector'
+};
+
 const lobbies: Map<string, MultiplayerLobby> = new Map();
 const socketToPlayer: Map<WebSocket, {
   playerId: string;
@@ -68,73 +80,6 @@ const socketToPlayer: Map<WebSocket, {
   antiCheatFlags: number;
 }> = new Map();
 const leaverPenalties: Map<string, LeaverPenaltyRecord> = new Map();
-
-// Seed clean tactical sector rooms (Zero fake mockup human players — only real connected players and configured AI bots)
-const defaultLobbiesData: Array<Partial<MultiplayerLobby> & { id: string; name: string; hostName: string; mode: any }> = [
-  {
-    id: 'lob-1',
-    name: 'Sector-09 Canyon Skirmish (Team vs AI)',
-    hostName: 'OPEN COMMAND ROOM',
-    mode: 'team_ai',
-    mapName: 'Sector-09 Valley Pass',
-    maxPlayers: 6,
-    ping: 16,
-    status: 'Waiting',
-    seed: Math.floor(100000 + Math.random() * 899999),
-    players: [
-      { id: 'bot_init_1', name: '[BOT] Zagara_Brood', isHost: false, isAi: true, aiDifficulty: 'Hard', team: 2, faction: 'Zerg Swarm', ping: 0, ready: true, antiCheatVerified: true, antiCheatFlags: 0 }
-    ],
-    messages: []
-  },
-  {
-    id: 'lob-2',
-    name: 'Sector-09 Multi-Base Free-For-All',
-    hostName: 'OPEN COMMAND ROOM',
-    mode: 'ffa',
-    mapName: 'Sector-09 Valley Pass',
-    maxPlayers: 6,
-    ping: 18,
-    status: 'Waiting',
-    seed: Math.floor(100000 + Math.random() * 899999),
-    players: [
-      { id: 'bot_init_2', name: '[BOT] Artanis_Synod', isHost: false, isAi: true, aiDifficulty: 'Hard', team: 0, faction: 'Protoss Solaris', ping: 0, ready: true, antiCheatVerified: true, antiCheatFlags: 0 },
-      { id: 'bot_init_3', name: '[BOT] Kerrigan_Hive', isHost: false, isAi: true, aiDifficulty: 'Brutal', team: 0, faction: 'Zerg Swarm', ping: 0, ready: true, antiCheatVerified: true, antiCheatFlags: 0 }
-    ],
-    messages: []
-  },
-  {
-    id: 'lob-3',
-    name: 'Sector-09 Co-Op 2v2 Defense',
-    hostName: 'OPEN COMMAND ROOM',
-    mode: '2v2',
-    mapName: 'Sector-09 Valley Pass',
-    maxPlayers: 4,
-    ping: 14,
-    status: 'Waiting',
-    seed: Math.floor(100000 + Math.random() * 899999),
-    players: [
-      { id: 'bot_init_4', name: '[BOT] Abathur_Swarm', isHost: false, isAi: true, aiDifficulty: 'Hard', team: 2, faction: 'Zerg Swarm', ping: 0, ready: true, antiCheatVerified: true, antiCheatFlags: 0 }
-    ],
-    messages: []
-  }
-];
-
-defaultLobbiesData.forEach(d => {
-  lobbies.set(d.id, {
-    id: d.id,
-    name: d.name,
-    hostName: d.hostName,
-    hostId: d.players![0]?.id || '',
-    mode: d.mode,
-    mapName: d.mapName || 'Sector-09 Valley Pass',
-    maxPlayers: d.maxPlayers || 6,
-    ping: d.ping || 16,
-    status: d.status || 'Waiting',
-    players: d.players || [],
-    messages: d.messages || [],
-    seed: d.seed || Math.floor(100000 + Math.random() * 899999)
-  });
-});
 
 function getActivePenalty(clientKey: string): LeaverPenaltyRecord | null {
   const rec = leaverPenalties.get(clientKey);
@@ -364,38 +309,63 @@ wss.on('connection', (ws) => {
             return;
           }
 
-          const lobbyId = `lob_${Date.now()}`;
+          if (meta.lobbyId) {
+            removePlayerFromCurrentLobby(ws, false);
+          }
+
+          const lobbyId = `lob_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+          const mapBiome = (['highland', 'desert', 'ocean', 'lava', 'jungle', 'random'].includes(msg.mapBiome) ? msg.mapBiome : 'highland') as MultiplayerLobby['mapBiome'];
+          const mode: LobbyGameMode = msg.mode || '1v1';
+          const hostFaction = msg.faction || 'Terran Dominion';
+          const hostPlayer: LobbyPlayer = {
+            id: meta.playerId,
+            name: meta.name,
+            isHost: true,
+            isAi: false,
+            team: mode === 'ffa' ? 0 : 1,
+            faction: hostFaction,
+            ping: 15,
+            ready: true,
+            antiCheatVerified: true,
+            antiCheatFlags: 0
+          };
+
+          let initialPlayers: LobbyPlayer[] = [hostPlayer];
+          if (Array.isArray(msg.initialPlayers) && msg.initialPlayers.length > 0) {
+            initialPlayers = msg.initialPlayers.map((p: any, idx: number) => ({
+              id: p.isAi ? (p.id || `bot_${Date.now()}_${idx}`) : meta.playerId,
+              name: p.isAi ? String(p.name || `[BOT] Commander_${idx + 1}`) : meta.name,
+              isHost: !p.isAi && idx === 0,
+              isAi: Boolean(p.isAi),
+              aiDifficulty: p.isAi ? (p.aiDifficulty || 'Hard') : undefined,
+              team: (typeof p.team === 'number' ? p.team : (mode === 'ffa' ? 0 : (p.isAi ? 2 : 1))) as LobbyPlayer['team'],
+              faction: p.faction || (p.isAi ? 'Zerg Swarm' : hostFaction),
+              ping: p.isAi ? 0 : 15,
+              ready: true,
+              antiCheatVerified: true,
+              antiCheatFlags: 0
+            }));
+          }
+
           const newLobby: MultiplayerLobby = {
             id: lobbyId,
-            name: msg.name || `${meta.name}'s Battle Room`,
+            name: String(msg.name || `${meta.name}'s Match`).slice(0, 48),
             hostName: meta.name,
             hostId: meta.playerId,
-            mode: msg.mode || 'team_ai',
-            mapName: 'Sector-09 Valley Pass',
-            maxPlayers: msg.maxPlayers || 6,
+            mode,
+            mapBiome,
+            mapName: BIOME_MAP_NAMES[mapBiome] || 'Koprulu Highland Pass',
+            maxPlayers: Math.max(2, Math.min(8, Number(msg.maxPlayers) || 6)),
             ping: 15,
             status: 'Waiting',
             seed: (Number.isFinite(Number(msg.seed)) && Number(msg.seed) > 0)
               ? Math.floor(Number(msg.seed))
               : Math.floor(100000 + Math.random() * 899999),
-            players: [
-              {
-                id: meta.playerId,
-                name: meta.name,
-                isHost: true,
-                isAi: false,
-                team: 1,
-                faction: 'Terran Dominion',
-                ping: 15,
-                ready: true,
-                antiCheatVerified: true,
-                antiCheatFlags: 0
-              }
-            ],
+            players: initialPlayers,
             messages: [
               {
                 sender: 'SYSTEM',
-                text: `Room created by ${meta.name}. Valkyrie Anti-Cheat & Resource Link active.`,
+                text: `Room created by ${meta.name}.`,
                 time: nowTimeLabel(),
                 channel: 'SYSTEM'
               }
@@ -425,28 +395,32 @@ wss.on('connection', (ws) => {
 
           const lobby = lobbies.get(msg.lobbyId);
           if (!lobby) {
-            ws.send(JSON.stringify({ type: 's:error', message: 'Lobby not found' }));
+            ws.send(JSON.stringify({ type: 's:error', message: 'Lobby not found on server.' }));
+            return;
+          }
+          if (lobby.players.length >= lobby.maxPlayers && !lobby.players.some(p => p.id === meta.playerId)) {
+            ws.send(JSON.stringify({ type: 's:error', message: 'Lobby is full.' }));
             return;
           }
           meta.lobbyId = lobby.id;
-          if (msg.name) meta.name = msg.name;
+          if (msg.name) meta.name = String(msg.name).slice(0, 24);
 
           const existingPlayer = lobby.players.find(p => p.id === meta.playerId);
           const hasHumanHost = lobby.players.some(p => !p.isAi && p.isHost);
           if (!existingPlayer) {
-            const teamChoice: 1 | 2 | 0 = lobby.mode === 'ffa' ? 0 : 1;
+            const teamChoice: 1 | 2 | 3 | 4 | 0 = lobby.mode === 'ffa' ? 0 : 1;
             const makeHost = !hasHumanHost;
             if (makeHost) {
               lobby.hostId = meta.playerId;
               lobby.hostName = meta.name;
             }
-            lobby.players.unshift({
+            lobby.players.push({
               id: meta.playerId,
               name: meta.name,
               isHost: makeHost,
               isAi: false,
               team: teamChoice,
-              faction: 'Terran Dominion',
+              faction: msg.faction || 'Terran Dominion',
               ping: 16,
               ready: true,
               antiCheatVerified: true,
@@ -467,23 +441,64 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        case 'c:update_lobby_config': {
+          if (!meta.lobbyId) return;
+          const lobby = lobbies.get(meta.lobbyId);
+          if (!lobby) return;
+          if (typeof msg.name === 'string' && msg.name.trim()) {
+            lobby.name = msg.name.trim().slice(0, 48);
+          }
+          if (typeof msg.mode === 'string') {
+            lobby.mode = msg.mode as LobbyGameMode;
+          }
+          if (typeof msg.mapBiome === 'string' && ['highland', 'desert', 'ocean', 'lava', 'jungle', 'random'].includes(msg.mapBiome)) {
+            lobby.mapBiome = msg.mapBiome as MultiplayerLobby['mapBiome'];
+            lobby.mapName = BIOME_MAP_NAMES[lobby.mapBiome] || lobby.mapName;
+          }
+          if (Number.isFinite(Number(msg.seed)) && Number(msg.seed) > 0) {
+            lobby.seed = Math.floor(Number(msg.seed));
+          }
+          if (Array.isArray(msg.players)) {
+            lobby.players = msg.players.slice(0, lobby.maxPlayers).map((p: any, idx: number) => ({
+              id: String(p.id || (p.isAi ? `bot_${Date.now()}_${idx}` : meta.playerId)),
+              name: String(p.name || (p.isAi ? `[BOT] AI_${idx + 1}` : meta.name)),
+              isHost: Boolean(p.isHost),
+              isAi: Boolean(p.isAi),
+              aiDifficulty: p.isAi ? (p.aiDifficulty || 'Hard') : undefined,
+              team: (typeof p.team === 'number' ? p.team : 1) as LobbyPlayer['team'],
+              faction: p.faction || 'Terran Dominion',
+              ping: p.isAi ? 0 : (Number(p.ping) || 15),
+              ready: p.isAi ? true : Boolean(p.ready),
+              antiCheatVerified: true,
+              antiCheatFlags: 0
+            }));
+          }
+          broadcastRoom(meta.lobbyId);
+          break;
+        }
+
         case 'c:update_player': {
           if (!meta.lobbyId) return;
           const lobby = lobbies.get(meta.lobbyId);
           if (!lobby) return;
-          const player = lobby.players.find(p => p.id === meta.playerId);
+          const targetId = msg.playerId || meta.playerId;
+          const player = lobby.players.find(p => p.id === targetId);
           if (player) {
             if (msg.team !== undefined) player.team = msg.team;
             if (msg.ready !== undefined) player.ready = msg.ready;
             if (msg.faction !== undefined) player.faction = msg.faction;
-            if (msg.name !== undefined) {
-              player.name = msg.name;
-              meta.name = msg.name;
-              if (player.isHost) lobby.hostName = msg.name;
+            if (msg.name !== undefined && !player.isAi) {
+              player.name = String(msg.name).slice(0, 24);
+              if (player.id === meta.playerId) meta.name = player.name;
+              if (player.isHost) lobby.hostName = player.name;
             }
           }
           if (msg.mode !== undefined) {
             lobby.mode = msg.mode;
+          }
+          if (msg.mapBiome !== undefined && ['highland', 'desert', 'ocean', 'lava', 'jungle', 'random'].includes(msg.mapBiome)) {
+            lobby.mapBiome = msg.mapBiome;
+            lobby.mapName = BIOME_MAP_NAMES[msg.mapBiome] || lobby.mapName;
           }
           broadcastRoom(meta.lobbyId);
           break;
@@ -494,19 +509,19 @@ wss.on('connection', (ws) => {
           const lobby = lobbies.get(meta.lobbyId);
           if (!lobby || lobby.players.length >= lobby.maxPlayers) return;
           const diff = msg.difficulty || 'Hard';
-          const botTeam: 1 | 2 | 0 = lobby.mode === 'ffa' ? 0 : (msg.team ?? 2);
+          const botTeam: 1 | 2 | 3 | 4 | 0 = lobby.mode === 'ffa' ? 0 : (msg.team ?? 2);
           const botNames = botTeam === 1
             ? ['Commander_Nova', 'Executor_Tassadar', 'Raynor_Raider', 'Artanis_Synod']
             : ['Zagara_Brood', 'Abathur_Swarm', 'Kerrigan_Hive', 'Dehaka_Pack'];
           const botLabel = msg.name || `[BOT] ${botNames[lobby.players.length % botNames.length]}`;
           lobby.players.push({
-            id: msg.botId || `bot_${Date.now()}_${Math.floor(Math.random() * 100)}`,
+            id: msg.botId || `bot_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
             name: botLabel,
             isHost: false,
             isAi: true,
             aiDifficulty: diff,
             team: botTeam,
-            faction: msg.faction || (botTeam === 1 ? 'Protoss Solaris' : (botTeam === 0 ? 'Protoss Solaris' : 'Zerg Swarm')),
+            faction: msg.faction || (botTeam === 1 ? 'Protoss Fleet' : (botTeam === 0 ? 'Protoss Fleet' : 'Zerg Swarm')),
             ping: 0,
             ready: true,
             antiCheatVerified: true,
@@ -525,6 +540,7 @@ wss.on('connection', (ws) => {
             if (msg.team !== undefined) bot.team = msg.team;
             if (msg.faction !== undefined) bot.faction = msg.faction;
             if (msg.aiDifficulty !== undefined) bot.aiDifficulty = msg.aiDifficulty;
+            if (msg.name !== undefined) bot.name = String(msg.name).slice(0, 28);
           }
           broadcastRoom(meta.lobbyId);
           break;

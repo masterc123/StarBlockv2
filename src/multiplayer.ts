@@ -9,7 +9,7 @@ export interface LobbyPlayer {
   isHost: boolean;
   isAi: boolean;
   aiDifficulty?: 'Easy' | 'Medium' | 'Hard' | 'Brutal';
-  team: 1 | 2 | 0; // 0 = FFA
+  team: 1 | 2 | 3 | 4 | 0; // 0 = FFA
   faction: 'Terran Dominion' | 'Zerg Swarm' | 'Protoss Fleet' | 'Protoss Solaris';
   ping: number;
   ready: boolean;
@@ -25,12 +25,15 @@ export interface ChatMessageEntry {
   team?: number;
 }
 
+export type LobbyGameMode = '1v1' | '1v2' | '1v3' | '2v2' | 'ffa' | 'custom' | 'team_ai' | 'deathmatch';
+
 export interface MultiplayerLobby {
   id: string;
   name: string;
   hostName: string;
   hostId: string;
-  mode: 'team_ai' | 'deathmatch' | '2v2' | 'ffa';
+  mode: LobbyGameMode;
+  mapBiome?: 'highland' | 'desert' | 'ocean' | 'lava' | 'jungle' | 'random';
   mapName: string;
   maxPlayers: number;
   ping: number;
@@ -44,14 +47,13 @@ type Listener = (event: { type: string; payload: any }) => void;
 
 class RealtimeMultiplayerClient {
   private ws: WebSocket | null = null;
-  private channel: BroadcastChannel | null = null;
   private listeners: Set<Listener> = new Set();
-  private isConnected = false;
+  public isConnected = false;
   public myPlayerId: string;
   public myPlayerName: string;
   public clientKey: string;
   public currentLobbyId: string | null = null;
-  public measuredPing = 18;
+  public measuredPing = 0;
 
   constructor() {
     this.myPlayerId = `usr_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
@@ -70,22 +72,14 @@ class RealtimeMultiplayerClient {
       } catch {}
     }
 
-    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-      try {
-        this.channel = new BroadcastChannel('sector09_multiplayer_bus');
-        this.channel.onmessage = (e) => {
-          this.handleIncoming(e.data);
-        };
-      } catch (err) {
-        console.warn('BroadcastChannel error:', err);
-      }
-    }
-
     this.connectWebSocket();
   }
 
-  private connectWebSocket() {
+  public connectWebSocket() {
     if (typeof window === 'undefined') return;
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
 
@@ -110,16 +104,16 @@ class RealtimeMultiplayerClient {
 
       this.ws.onclose = () => {
         this.isConnected = false;
-        this.emit('connection_status', { connected: false, transport: 'broadcast_channel' });
-        setTimeout(() => this.connectWebSocket(), 3500);
+        this.emit('connection_status', { connected: false, transport: 'offline' });
       };
 
       this.ws.onerror = () => {
-        this.ws?.close();
+        this.isConnected = false;
+        this.emit('connection_status', { connected: false, transport: 'offline' });
       };
     } catch {
-      // In sandbox environments that disable raw WS, BroadcastChannel handles multi-tab
-      this.emit('connection_status', { connected: true, transport: 'broadcast_channel' });
+      this.isConnected = false;
+      this.emit('connection_status', { connected: false, transport: 'offline' });
     }
   }
 
@@ -140,7 +134,7 @@ class RealtimeMultiplayerClient {
     } else if (data.type === 's:game_order') {
       this.emit('game_order', data);
     } else if (data.type === 's:pong') {
-      const rtt = Math.max(8, Date.now() - (Number(data.clientTs) || Date.now()));
+      const rtt = Math.max(1, Date.now() - (Number(data.clientTs) || Date.now()));
       this.measuredPing = rtt;
       this.emit('ping_measured', { ping: rtt });
     } else if (data.type === 's:ping_update') {
@@ -153,20 +147,18 @@ class RealtimeMultiplayerClient {
       this.emit('anticheat_alert', data);
     } else if (data.type === 's:anticheat_ok') {
       this.emit('anticheat_ok', data);
+    } else if (data.type === 's:error') {
+      this.emit('server_error', data);
     }
   }
 
-  public send(msg: any) {
+  public send(msg: any): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return false;
+    }
     const payloadWithKey = { ...msg, clientKey: this.clientKey };
-    const raw = JSON.stringify(payloadWithKey);
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(raw);
-    }
-    if (this.channel) {
-      try {
-        this.channel.postMessage(payloadWithKey);
-      } catch {}
-    }
+    this.ws.send(JSON.stringify(payloadWithKey));
+    return true;
   }
 
   public subscribe(fn: Listener) {
@@ -178,17 +170,19 @@ class RealtimeMultiplayerClient {
     this.listeners.forEach((fn) => fn({ type, payload }));
   }
 
-  public createLobby(name: string, mode: 'team_ai' | 'deathmatch' | '2v2' | 'ffa') {
-    this.send({
+  public createLobby(name: string, mode: LobbyGameMode, mapBiome = 'highland', initialPlayers?: Partial<LobbyPlayer>[]) {
+    return this.send({
       type: 'c:create_lobby',
       name,
-      mode
+      mode,
+      mapBiome,
+      initialPlayers
     });
   }
 
   public joinLobby(lobbyId: string, name?: string) {
     this.currentLobbyId = lobbyId;
-    this.send({
+    return this.send({
       type: 'c:join_lobby',
       lobbyId,
       name: name || this.myPlayerName
@@ -197,37 +191,46 @@ class RealtimeMultiplayerClient {
 
   public leaveLobby(inGameAbandon = false) {
     this.currentLobbyId = null;
-    this.send({ type: 'c:leave_lobby', inGameAbandon });
+    return this.send({ type: 'c:leave_lobby', inGameAbandon });
   }
 
   public abandonMatch() {
     this.currentLobbyId = null;
-    this.send({ type: 'c:abandon_match' });
+    return this.send({ type: 'c:abandon_match' });
   }
 
-  public updatePlayer(updates: Partial<LobbyPlayer> & { mode?: string }) {
-    this.send({
+  public updateLobbyConfig(updates: { name?: string; mode?: LobbyGameMode; mapBiome?: string; seed?: number; players?: LobbyPlayer[] }) {
+    return this.send({
+      type: 'c:update_lobby_config',
+      ...updates
+    });
+  }
+
+  public updatePlayer(updates: Partial<LobbyPlayer> & { mode?: string; mapBiome?: string }) {
+    return this.send({
       type: 'c:update_player',
       ...updates
     });
   }
 
-  public addBot(difficulty: 'Easy' | 'Medium' | 'Hard' | 'Brutal') {
-    this.send({
+  public addBot(difficulty: 'Easy' | 'Medium' | 'Hard' | 'Brutal', team: 1 | 2 | 3 | 4 | 0 = 2, faction?: string) {
+    return this.send({
       type: 'c:add_bot',
-      difficulty
+      difficulty,
+      team,
+      faction
     });
   }
 
   public removePlayer(playerId: string) {
-    this.send({
+    return this.send({
       type: 'c:remove_player',
       playerId
     });
   }
 
   public sendChat(text: string, channel: 'ALL' | 'TEAM' = 'ALL') {
-    this.send({
+    return this.send({
       type: 'c:chat',
       text,
       channel
@@ -235,7 +238,7 @@ class RealtimeMultiplayerClient {
   }
 
   public shareResources(toPlayerId: string, toPlayerName: string, minerals: number, gems: number) {
-    this.send({
+    return this.send({
       type: 'c:share_resources',
       toPlayerId,
       toPlayerName,
@@ -245,18 +248,18 @@ class RealtimeMultiplayerClient {
   }
 
   public sendAntiCheatHeartbeat(digest: { req: number; gems: number; unitsCount: number; buildingsCount: number; wave: number; checksum: number }) {
-    this.send({
+    return this.send({
       type: 'c:anticheat_heartbeat',
       ...digest
     });
   }
 
   public startGame() {
-    this.send({ type: 'c:start_game' });
+    return this.send({ type: 'c:start_game' });
   }
 
   public sendGameOrder(order: any) {
-    this.send({
+    return this.send({
       type: 'c:game_order',
       order
     });

@@ -1761,11 +1761,14 @@ renderer.domElement.addEventListener('webglcontextrestored', () => {
         if (typeof window.validateAndRepairTerrainPipeline === 'function') {
             window.validateAndRepairTerrainPipeline();
         }
+        if (window.SCENE_INTEGRITY_VALIDATOR && typeof window.SCENE_INTEGRITY_VALIDATOR.validateSceneGraph === 'function') {
+            window.SCENE_INTEGRITY_VALIDATOR.validateSceneGraph(scene, 'webglcontextrestored');
+        }
         scene.traverse(obj => {
-            if (obj.isMesh) {
+            if (obj && obj.isMesh) {
                 if (obj.geometry && obj.geometry.attributes) {
                     for (const k in obj.geometry.attributes) {
-                        obj.geometry.attributes[k].needsUpdate = true;
+                        if (obj.geometry.attributes[k]) obj.geometry.attributes[k].needsUpdate = true;
                     }
                 }
                 const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
@@ -1787,6 +1790,157 @@ renderer.domElement.addEventListener('webglcontextrestored', () => {
         if (window.APP_ERROR_HANDLER) window.APP_ERROR_HANDLER.record('webglcontextrestored', err, 'graphics');
     }
 });
+
+// ============================================================================
+// DEVELOPMENT SCENE INTEGRITY VALIDATOR (Detects & Reports Invalid Scene Nodes)
+// ============================================================================
+const SCENE_INTEGRITY_VALIDATOR = {
+    enabled: true,
+    reports: [],
+    lastValidatedFrame: -1,
+    totalChecks: 0,
+    totalRepairs: 0,
+    _inferSubsystemFromStack(stackStr) {
+        if (!stackStr) return 'unknown';
+        if (stackStr.includes('terrain-fow.js')) return 'terrain-fow';
+        if (stackStr.includes('models-fx.js')) return 'models-fx';
+        if (stackStr.includes('textures-scene.js')) return 'textures-scene';
+        if (stackStr.includes('perf_optimizer.js')) return 'perf-optimizer';
+        if (stackStr.includes('game.js')) return 'game-loop';
+        return 'scene-graph';
+    },
+    recordInvalidObject(info) {
+        const entry = {
+            timestamp: new Date().toISOString(),
+            name: info.name || '<unnamed>',
+            type: info.type || typeof info.rawObject,
+            parent: info.parentName || (info.parent ? (info.parent.name || info.parent.type || info.parent.uuid) : '<root>'),
+            parentUuid: info.parent ? info.parent.uuid : null,
+            uuid: info.uuid || '<no-uuid>',
+            creationSource: info.creationSource || 'unknown',
+            subsystem: info.subsystem || 'scene-graph',
+            reason: info.reason || 'Invalid Object3D in scene hierarchy'
+        };
+        this.reports.push(entry);
+        if (this.reports.length > 100) this.reports.shift();
+        console.warn('[SCENE_INTEGRITY_VALIDATOR] Invalid scene object detected:', entry);
+        if (window.APP_ERROR_HANDLER && typeof window.APP_ERROR_HANDLER.record === 'function') {
+            window.APP_ERROR_HANDLER.record(
+                'scene-integrity',
+                `Invalid scene object (${entry.reason}): name=${entry.name}, type=${entry.type}, parent=${entry.parent}, uuid=${entry.uuid}, source=${entry.creationSource}`,
+                entry.subsystem
+            );
+        }
+        return entry;
+    },
+    validateSceneGraph(rootObj, subsystemContext = 'render-loop') {
+        if (!rootObj) return { valid: false, repairedCount: 0, reports: this.reports };
+        this.totalChecks++;
+        let repairedCount = 0;
+        const stack = [rootObj];
+        const visited = new Set();
+
+        while (stack.length > 0) {
+            const node = stack.pop();
+            if (!node || typeof node !== 'object') continue;
+            if (visited.has(node)) continue;
+            visited.add(node);
+
+            if (typeof node.visible === 'undefined') {
+                node.visible = true;
+            }
+
+            if (Array.isArray(node.children)) {
+                for (let i = node.children.length - 1; i >= 0; i--) {
+                    const child = node.children[i];
+                    const isInvalid =
+                        child === undefined ||
+                        child === null ||
+                        typeof child !== 'object' ||
+                        !child.isObject3D ||
+                        typeof child.visible === 'undefined' ||
+                        !Array.isArray(child.children) ||
+                        !child.matrixWorld ||
+                        !child.position ||
+                        Number.isNaN(child.position.x) ||
+                        Number.isNaN(child.position.y) ||
+                        Number.isNaN(child.position.z);
+
+                    if (isInvalid) {
+                        this.recordInvalidObject({
+                            rawObject: child,
+                            name: child && child.name ? child.name : `children[${i}]`,
+                            type: child && child.type ? child.type : typeof child,
+                            parent: node,
+                            parentName: node.name || node.type || node.uuid,
+                            uuid: child && child.uuid ? child.uuid : null,
+                            creationSource: (child && child.userData && child.userData._creationSource) || (node.userData && node.userData._creationSource) || subsystemContext,
+                            subsystem: (child && child.userData && child.userData._subsystem) || (node.userData && node.userData._subsystem) || subsystemContext,
+                            reason: child === undefined || child === null
+                                ? 'Null or undefined child in Object3D.children'
+                                : (!child.isObject3D || typeof child.visible === 'undefined'
+                                    ? 'Non-Object3D or missing .visible property'
+                                    : 'NaN position or corrupted matrixWorld')
+                        });
+                        if (child && child.isObject3D && Number.isNaN(child.position.x)) {
+                            child.position.set(0, 0, 0);
+                            child.updateMatrix();
+                            child.updateMatrixWorld(true);
+                        } else {
+                            node.children.splice(i, 1);
+                        }
+                        repairedCount++;
+                        this.totalRepairs++;
+                    } else {
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+        return {
+            valid: repairedCount === 0,
+            repairedCount,
+            totalChecks: this.totalChecks,
+            totalRepairs: this.totalRepairs,
+            reports: this.reports
+        };
+    }
+};
+
+// Guard THREE.Object3D.prototype.add against undefined/invalid objects entering .children
+if (typeof THREE !== 'undefined' && THREE.Object3D && !THREE.Object3D.prototype._starblockGuardedAdd) {
+    const _origObject3DAdd = THREE.Object3D.prototype.add;
+    THREE.Object3D.prototype.add = function (...objects) {
+        if (objects.length === 0) return this;
+        const validObjects = [];
+        for (let i = 0; i < objects.length; i++) {
+            const obj = objects[i];
+            if (!obj || typeof obj !== 'object' || !obj.isObject3D || typeof obj.visible === 'undefined') {
+                const errStack = new Error().stack || '';
+                SCENE_INTEGRITY_VALIDATOR.recordInvalidObject({
+                    rawObject: obj,
+                    name: obj && obj.name ? obj.name : `add_arg[${i}]`,
+                    type: obj && obj.type ? obj.type : typeof obj,
+                    parent: this,
+                    parentName: this.name || this.type || this.uuid,
+                    uuid: obj && obj.uuid ? obj.uuid : null,
+                    creationSource: errStack.split('\n').slice(1, 4).map(s => s.trim()).join(' <- '),
+                    subsystem: SCENE_INTEGRITY_VALIDATOR._inferSubsystemFromStack(errStack),
+                    reason: 'Attempted to call Object3D.add() with undefined or non-Object3D value'
+                });
+                continue;
+            }
+            if (obj.userData && !obj.userData._subsystem) {
+                obj.userData._subsystem = (this.userData && this.userData._subsystem) || 'scene-object';
+            }
+            validObjects.push(obj);
+        }
+        if (validObjects.length === 0) return this;
+        return _origObject3DAdd.apply(this, validObjects);
+    };
+    THREE.Object3D.prototype._starblockGuardedAdd = true;
+}
+window.SCENE_INTEGRITY_VALIDATOR = SCENE_INTEGRITY_VALIDATOR;
 
 // Procedural Web Audio Synthesizer (Weight-scaled tactical feedback with mute toggle)
 const SFX = {
@@ -2631,6 +2785,10 @@ const zergBioShaderMat = new THREE.ShaderMaterial({
 
 const waterShaderMat = new THREE.ShaderMaterial({
     transparent: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
     uniforms: {
         uTime: { value: 0 },
         uRainIntensity: { value: 0.0 },
@@ -2662,7 +2820,10 @@ const waterShaderMat = new THREE.ShaderMaterial({
             vUv = uv;
             vVertColor = (dot(color, color) > 0.001) ? color : vec3(0.12, 0.36, 0.46);
             vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-            float edgeFactor = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)) * 2.0;
+            float isOcean = step(0.6, 1.0 - abs(uBiomeId - 2.0));
+            float edgeFactor = (isOcean > 0.5)
+                ? clamp(1.0 - (vVertColor.g - 0.14) * 1.45, 0.0, 1.0)
+                : (min(uv.y, 1.0 - uv.y) * 2.0);
             float shoreWaveMask = smoothstep(0.0, 0.26, edgeFactor);
 
             float flowPhase = dot(worldPosition.xz, uFlowDir) * 1.65 - uTime * 3.2;
@@ -2706,7 +2867,10 @@ const waterShaderMat = new THREE.ShaderMaterial({
         varying vec3 vVertColor;
         varying float vWaveHeight;
         void main() {
-            float edgeFactor = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y)) * 2.0;
+            float isOcean = step(0.6, 1.0 - abs(uBiomeId - 2.0));
+            float edgeFactor = (isOcean > 0.5)
+                ? clamp(1.0 - (vVertColor.g - 0.14) * 1.45, 0.0, 1.0)
+                : (min(vUv.y, 1.0 - vUv.y) * 2.0);
             float radialDist = clamp(1.0 - edgeFactor, 0.0, 1.0);
             vec3 col;
 

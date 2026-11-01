@@ -1133,7 +1133,9 @@ function initEnemyHiveCluster() {
         { role: 'barracks',          offset: makeTacticalOffset(-7.8, -6.5), radius: 2.8, maxHp: 1300, color: '#b845ff', idx: 1, isProd: true }
     ];
 
-    initSolarisSynodEnclave();
+    if (!(state.isMultiplayerMatch && !state.hasAlliedAiCommander)) {
+        initSolarisSynodEnclave();
+    }
 
     // Ensure initial Zerg patrol vanguard spawns and registers into enemies[] when battlefield initializes
     if (enemyBuildings.length > 0 && enemies.length === 0) {
@@ -1223,6 +1225,7 @@ function initSolarisSynodEnclave() {
     });
     solarisBuildings.length = 0;
 
+    if (state.isMultiplayerMatch && !state.hasAlliedAiCommander) return;
     if (typeof SOLARIS_BASE_POS === 'undefined') return;
     const safeNexusPos = resolveSafeEnemyBuildingPos(SOLARIS_BASE_POS, 3.2, true);
     SOLARIS_BASE_POS.copy(safeNexusPos);
@@ -5735,9 +5738,38 @@ function spawnAlliedUnit(uType, spawnOrigin) {
         scene.add(prismaticBeam);
     }
 
+    let laserWeapons = null;
+    if (uType === 'battlecruiser') {
+        const turrets = (mesh.userData && Array.isArray(mesh.userData.laserTurrets)) ? mesh.userData.laserTurrets : [];
+        const muzzles = (mesh.userData && Array.isArray(mesh.userData.laserMuzzles)) ? mesh.userData.laserMuzzles : [];
+        const perCannonDmg = Math.max(18, Math.round(finalDmg * 0.42));
+        laserWeapons = [];
+        for (let wi = 0; wi < 4; wi++) {
+            const beamGroup = createBattlecruiserLaserBeamGroup(wi);
+            scene.add(beamGroup);
+            laserWeapons.push({
+                index: wi,
+                mount: turrets[wi] || null,
+                muzzle: muzzles[wi] || null,
+                target: null,
+                targetId: null,
+                cooldown: wi * 0.07,
+                fireRate: 0.44 + (wi % 2) * 0.03,
+                damage: perCannonDmg,
+                beamGroup,
+                beamTimer: 0,
+                lastMuzzleWorldPos: new THREE.Vector3(),
+                lastTargetWorldPos: new THREE.Vector3(),
+                shotsFired: 0,
+                totalDamageDealt: 0
+            });
+        }
+    }
+
     const newUnitObj = {
         type: uType, isAir, isVehicle: isMechanical, isMechanical, isBiological,
-        radius: stats.rad, mesh, hb, healBeam, prismaticBeam, selCircle,
+        radius: stats.rad, mesh, hb, healBeam, prismaticBeam, laserWeapons, selCircle,
+        yamatoCooldown: uType === 'battlecruiser' ? 3.5 : 0,
         baseMaxHp: stats.hp,
         baseDamage: stats.dmg,
         hp: finalMaxHp, maxHp: finalMaxHp,
@@ -5780,6 +5812,317 @@ function spawnAlliedUnit(uType, spawnOrigin) {
     updateHealthPip(hb, finalMaxHp, finalMaxHp, stats.shd || 0, stats.shd || 0);
     updateHUD();
 }
+
+function createBattlecruiserLaserBeamGroup(cannonIdx) {
+    const group = new THREE.Group();
+    group.name = `bc_laser_beam_${cannonIdx}`;
+    group.visible = false;
+    group.frustumCulled = false;
+
+    const coreGeo = new THREE.CylinderGeometry(0.032, 0.032, 1.0, 8);
+    coreGeo.translate(0, 0.5, 0);
+    coreGeo.rotateX(Math.PI / 2);
+    const coreMat = new THREE.MeshBasicMaterial({
+        color: 0xfff3b0,
+        transparent: true,
+        opacity: 0.96,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+    });
+    const coreMesh = new THREE.Mesh(coreGeo, coreMat);
+
+    const glowGeo = new THREE.CylinderGeometry(0.085, 0.085, 1.0, 8);
+    glowGeo.translate(0, 0.5, 0);
+    glowGeo.rotateX(Math.PI / 2);
+    const glowMat = new THREE.MeshBasicMaterial({
+        color: 0xff5400,
+        transparent: true,
+        opacity: 0.68,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+    });
+    const glowMesh = new THREE.Mesh(glowGeo, glowMat);
+
+    const impactGeo = new THREE.SphereGeometry(0.22, 10, 8);
+    const impactMat = new THREE.MeshBasicMaterial({
+        color: 0xffaa00,
+        transparent: true,
+        opacity: 0.90,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+    });
+    const impactMesh = new THREE.Mesh(impactGeo, impactMat);
+
+    group.add(coreMesh, glowMesh, impactMesh);
+    group.userData = { coreMesh, glowMesh, impactMesh, cannonIdx };
+    return group;
+}
+
+function cleanupBattlecruiserLaserWeapons(u) {
+    if (!u || !Array.isArray(u.laserWeapons)) return;
+    for (let i = 0; i < u.laserWeapons.length; i++) {
+        const w = u.laserWeapons[i];
+        if (w && w.beamGroup) {
+            w.beamGroup.visible = false;
+            scene.remove(w.beamGroup);
+        }
+        if (w && w.mount && w.mount.userData) {
+            w.mount.userData.hasIndependentTarget = false;
+            w.mount.userData.flashTimer = 0;
+            if (w.mount.userData.muzzleFlash) w.mount.userData.muzzleFlash.visible = false;
+        }
+    }
+}
+
+function updateBattlecruiserFourLaserWeapons(u, dt) {
+    if (!u || u.type !== 'battlecruiser' || !u.mesh || u.hp <= 0) return null;
+    if (!Array.isArray(u.laserWeapons) || u.laserWeapons.length !== 4) return null;
+
+    const bcPos = u.mesh.position;
+    const maxUnitRange = (u.range || 18.5) + 1.0;
+    const maxBldRange = (u.range || 18.5) + 3.0;
+
+    // 1. Collect all living valid enemy targets in range with line-of-sight check
+    const validTargets = [];
+    for (let ei = 0; ei < enemies.length; ei++) {
+        const e = enemies[ei];
+        if (!e || e.hp <= 0 || !e.mesh) continue;
+        const d = Math.hypot(e.mesh.position.x - bcPos.x, e.mesh.position.z - bcPos.z);
+        if (d <= maxUnitRange) {
+            validTargets.push({ entity: e, isBuilding: false, dist: d });
+        }
+    }
+    for (let ebi = 0; ebi < enemyBuildings.length; ebi++) {
+        const eb = enemyBuildings[ebi];
+        if (!eb || eb.hp <= 0 || !eb.pos) continue;
+        const d = Math.hypot(eb.pos.x - bcPos.x, eb.pos.z - bcPos.z);
+        if (d <= maxBldRange) {
+            validTargets.push({ entity: eb, isBuilding: true, dist: d });
+        }
+    }
+    validTargets.sort((a, b) => a.dist - b.dist);
+
+    const validEntitySet = new Set(validTargets.map(vt => vt.entity));
+
+    // 2. Clear any weapon target that died, left range, or became invalid
+    for (let wi = 0; wi < 4; wi++) {
+        const w = u.laserWeapons[wi];
+        if (!w.target || w.target.hp <= 0 || !validEntitySet.has(w.target)) {
+            w.target = null;
+            w.targetId = null;
+            w.beamTimer = 0;
+            if (w.beamGroup) w.beamGroup.visible = false;
+            if (w.mount && w.mount.userData) {
+                w.mount.userData.hasIndependentTarget = false;
+            }
+        }
+    }
+
+    // 3. Assign targets across the 4 independent laser cannons:
+    // - If >= 4 valid targets exist, each cannon targets a DIFFERENT enemy.
+    // - If 1..3 valid targets exist, distribute the 4 cannons across available targets without leaving cannons idle.
+    if (validTargets.length > 0) {
+        const distinctPoolCount = Math.min(4, validTargets.length);
+        const assignedInPass = new Set();
+
+        if (validTargets.length >= 4) {
+            // Keep existing valid distinct locks first
+            for (let wi = 0; wi < 4; wi++) {
+                const w = u.laserWeapons[wi];
+                if (w.target && !assignedInPass.has(w.target)) {
+                    assignedInPass.add(w.target);
+                } else {
+                    w.target = null;
+                }
+            }
+            // Assign remaining cannons to distinct unassigned targets
+            for (let wi = 0; wi < 4; wi++) {
+                const w = u.laserWeapons[wi];
+                if (!w.target) {
+                    const candidate = validTargets.find(vt => !assignedInPass.has(vt.entity));
+                    if (candidate) {
+                        w.target = candidate.entity;
+                        assignedInPass.add(candidate.entity);
+                    }
+                }
+            }
+        } else {
+            // Fewer than 4 targets in range: distribute the 4 weapons evenly across available targets
+            for (let wi = 0; wi < 4; wi++) {
+                const w = u.laserWeapons[wi];
+                const pick = validTargets[wi % distinctPoolCount].entity;
+                w.target = pick;
+            }
+        }
+    }
+
+    // Ensure world matrices of the Battlecruiser airframe and mounts are up to date
+    u.mesh.updateMatrixWorld(true);
+    const airframe = u.mesh.userData ? u.mesh.userData.airframe : null;
+    const upgW = (state.upgrades && state.upgrades.terran) ? (state.upgrades.terran.weapons || 0) : 0;
+    const perCannonDmg = Math.max(18, Math.round((u.baseDamage || u.damage || 65) * 0.42 * (1.0 + upgW * 0.20)));
+
+    let primaryAimPos = null;
+    const nowTime = performance.now() * 0.001;
+
+    // 4. Update each of the 4 laser cannons independently (aim, world-space muzzle pos, cooldown, damage, beam FX)
+    for (let wi = 0; wi < 4; wi++) {
+        const w = u.laserWeapons[wi];
+        w.damage = perCannonDmg;
+        w.cooldown = Math.max(0, (w.cooldown || 0) - dt);
+        w.beamTimer = Math.max(0, (w.beamTimer || 0) - dt);
+
+        const tgt = w.target;
+        if (!tgt || tgt.hp <= 0) {
+            w.target = null;
+            w.targetId = null;
+            if (w.beamGroup) w.beamGroup.visible = false;
+            if (w.mount && w.mount.userData) w.mount.userData.hasIndependentTarget = false;
+            continue;
+        }
+
+        const rawTPos = tgt.mesh ? tgt.mesh.position : tgt.pos;
+        const targetY = (rawTPos.y || 0) + (tgt.isAir ? 0.0 : 0.65);
+        w.lastTargetWorldPos.set(rawTPos.x, targetY, rawTPos.z);
+        w.targetId = tgt.id || (tgt.role ? `bld_${tgt.role}_${tgt.bpIdx || 0}` : `target_${wi}`);
+        if (!primaryAimPos) primaryAimPos = w.lastTargetWorldPos;
+
+        // Orient this turret mount toward its own target in airframe local space
+        if (w.mount && airframe) {
+            if (!w.mount.userData) w.mount.userData = {};
+            w.mount.userData.hasIndependentTarget = true;
+            if (!w.mount.userData.targetWorldPos) w.mount.userData.targetWorldPos = new THREE.Vector3();
+            w.mount.userData.targetWorldPos.copy(w.lastTargetWorldPos);
+
+            const localAim = airframe.worldToLocal(_muzzleScratch2.copy(w.lastTargetWorldPos));
+            const desiredYaw = Math.atan2(localAim.x - w.mount.position.x, localAim.z - w.mount.position.z);
+            w.mount.rotation.y = THREE.MathUtils.lerp(w.mount.rotation.y || 0, desiredYaw, Math.min(1, dt * 16));
+            w.mount.updateMatrixWorld(true);
+        }
+
+        // Calculate exact world-space muzzle origin from this cannon's muzzle node
+        if (w.muzzle) {
+            w.muzzle.getWorldPosition(w.lastMuzzleWorldPos);
+        } else if (w.mount) {
+            w.mount.getWorldPosition(w.lastMuzzleWorldPos);
+        } else {
+            w.lastMuzzleWorldPos.copy(bcPos);
+        }
+
+        // Fire when this cannon's independent cooldown reaches 0
+        if (w.cooldown <= 0) {
+            w.cooldown = w.fireRate;
+            w.beamTimer = 0.24;
+            w.shotsFired = (w.shotsFired || 0) + 1;
+            w.totalDamageDealt = (w.totalDamageDealt || 0) + w.damage;
+
+            if (u.mesh.userData) u.mesh.userData.attackAnim = 1.0;
+            if (w.mount && w.mount.userData) {
+                w.mount.userData.flashTimer = 0.12;
+                if (w.mount.userData.muzzleFlash) w.mount.userData.muzzleFlash.visible = true;
+            }
+
+            // Apply genuine per-cannon damage to this cannon's target
+            if (!enemyBuildings.includes(tgt)) {
+                recordRagdollHitImpulse(tgt, w.lastMuzzleWorldPos, false);
+            }
+            tgt.hp -= w.damage;
+
+            triggerMuzzleFlash(w.lastMuzzleWorldPos);
+            if (typeof triggerSparks === 'function' && Math.random() < 0.75) {
+                triggerSparks(w.lastTargetWorldPos);
+            }
+            spawnCombatFloat(rawTPos, w.damage, '#ffaa33');
+            if (enemyBuildings.includes(tgt)) updateHUD();
+
+            // If target died from this cannon's shot, immediately stop beam on next check
+            if (tgt.hp <= 0) {
+                w.beamTimer = 0.05;
+            }
+        }
+
+        // Update 3D laser beam mesh connecting this cannon's muzzle to its target
+        if (w.beamGroup && w.beamTimer > 0 && tgt.hp > 0) {
+            const dist = Math.max(0.25, w.lastMuzzleWorldPos.distanceTo(w.lastTargetWorldPos));
+            const pulse = 0.85 + Math.sin(nowTime * 38.0 + wi * 1.7) * 0.25;
+            w.beamGroup.visible = true;
+            w.beamGroup.position.copy(w.lastMuzzleWorldPos);
+            w.beamGroup.lookAt(w.lastTargetWorldPos);
+            const ud = w.beamGroup.userData;
+            if (ud.coreMesh) {
+                ud.coreMesh.scale.set(pulse, pulse, dist);
+                ud.coreMesh.material.opacity = Math.min(1.0, (w.beamTimer / 0.24) * 1.15);
+            }
+            if (ud.glowMesh) {
+                ud.glowMesh.scale.set(pulse * 1.25, pulse * 1.25, dist);
+                ud.glowMesh.material.opacity = Math.min(0.78, (w.beamTimer / 0.24) * 0.85);
+            }
+            if (ud.impactMesh) {
+                ud.impactMesh.position.set(0, 0, dist);
+                ud.impactMesh.scale.setScalar(0.75 + pulse * 0.45);
+            }
+        } else if (w.beamGroup) {
+            w.beamGroup.visible = false;
+        }
+    }
+
+    // 5. Preserve Yamato Cannon as a separate heavy weapon on its own cooldown
+    u.yamatoCooldown = Math.max(0, (u.yamatoCooldown || 0) - dt);
+    if (u.yamatoCooldown <= 0 && validTargets.length > 0) {
+        let heavyCandidate = validTargets[0].entity;
+        for (let vi = 0; vi < validTargets.length; vi++) {
+            if ((validTargets[vi].entity.hp || 0) > (heavyCandidate.hp || 0)) {
+                heavyCandidate = validTargets[vi].entity;
+            }
+        }
+        const yamatoMuzzle = typeof window.getWeaponMuzzleWorldPos === 'function'
+            ? window.getWeaponMuzzleWorldPos(u, 99, _muzzleScratch2)
+            : _muzzleScratch2.set(bcPos.x, bcPos.y, bcPos.z);
+        launchOrdProjectile(yamatoMuzzle, heavyCandidate, 'yamato', Math.round(u.damage * 2.65), false);
+        u.yamatoCooldown = 6.5;
+    }
+
+    return primaryAimPos;
+}
+
+window.getBattlecruiserWeaponDiagnostics = function(bcUnit) {
+    const u = bcUnit || units.find(item => item && item.type === 'battlecruiser' && item.hp > 0);
+    if (!u || !Array.isArray(u.laserWeapons)) return null;
+    u.mesh.updateMatrixWorld(true);
+    const weapons = u.laserWeapons.map(w => {
+        if (w.muzzle) w.muzzle.getWorldPosition(w.lastMuzzleWorldPos);
+        return {
+            index: w.index,
+            targetId: w.targetId || null,
+            hasTarget: Boolean(w.target && w.target.hp > 0),
+            targetHp: w.target ? w.target.hp : null,
+            cooldown: Number((w.cooldown || 0).toFixed(3)),
+            fireRate: w.fireRate,
+            damage: w.damage,
+            shotsFired: w.shotsFired || 0,
+            totalDamageDealt: w.totalDamageDealt || 0,
+            beamVisible: Boolean(w.beamGroup && w.beamGroup.visible),
+            muzzleWorldPos: {
+                x: Number(w.lastMuzzleWorldPos.x.toFixed(3)),
+                y: Number(w.lastMuzzleWorldPos.y.toFixed(3)),
+                z: Number(w.lastMuzzleWorldPos.z.toFixed(3))
+            },
+            targetWorldPos: {
+                x: Number(w.lastTargetWorldPos.x.toFixed(3)),
+                y: Number(w.lastTargetWorldPos.y.toFixed(3)),
+                z: Number(w.lastTargetWorldPos.z.toFixed(3))
+            }
+        };
+    });
+    const distinctTargets = new Set(weapons.filter(w => w.hasTarget && w.targetId).map(w => w.targetId));
+    return {
+        weaponCount: weapons.length,
+        distinctTargetCount: distinctTargets.size,
+        yamatoCooldown: Number((u.yamatoCooldown || 0).toFixed(2)),
+        weapons
+    };
+};
+window.updateBattlecruiserFourLaserWeapons = updateBattlecruiserFourLaserWeapons;
 
 function spawnEnemyFromBuilding(variant, originPos, sourceBuilding = null) {
     if (state.missionWon) return null;
@@ -10021,7 +10364,7 @@ function animate(now) {
     }
 
     // Allied Solaris Protoss Progressive Base, Proxy Outpost, Cannon Rush & Warp Gate Construction
-    if (state.basePlaced && !state.missionWon) {
+    if (state.basePlaced && !state.missionWon && !(state.isMultiplayerMatch && !state.hasAlliedAiCommander) && solarisBuildings.length > 0) {
         state.solarisBuildTimer = (state.solarisBuildTimer || 18.0) - dt;
         if (state.solarisBuildTimer <= 0) {
             constructNextSolarisStructure();
@@ -12007,6 +12350,12 @@ function animate(now) {
                 }
             }
 
+            // --- TERRAN BATTLECRUISER 4 INDEPENDENT LASER CANNONS + HEAVY YAMATO CANNON ---
+            if (u.type === 'battlecruiser') {
+                const bcAim = updateBattlecruiserFourLaserWeapons(u, dt);
+                if (bcAim) aimTargetPos = bcAim;
+            }
+
             // --- PROTOSS CARRIER AUTONOMOUS INTERCEPTOR SQUADRON AI ---
             if (u.type === 'carrier') {
                 if (!u.interceptors) u.interceptors = [];
@@ -12173,20 +12522,8 @@ function animate(now) {
 
                         const isMeleeStrike = (u.type === 'grunt' || u.type === 'zealot' || u.type === 'skitterer' || u.type === 'crusher' || u.type === 'burster');
                         if (!isMeleeStrike && u.range > 2.35) {
-                            if (u.type === 'void_ray' || u.type === 'carrier') {
-                                // Handled by dedicated Prismatic Beam & Autonomous Interceptor Squadron systems above
-                            } else if (u.type === 'battlecruiser') {
-                                u.yamatoShotCounter = ((u.yamatoShotCounter || 0) + 1) % 6;
-                                if (u.yamatoShotCounter === 0) {
-                                    const yamatoMuzzle = window.getWeaponMuzzleWorldPos(u, 99, _muzzleScratch2);
-                                    launchOrdProjectile(yamatoMuzzle, target, 'yamato', Math.round(u.damage * 2.65), false);
-                                    spawnCombatFloat(u.mesh.position, 'YAMATO CANNON!', '#ffaa00');
-                                } else {
-                                    const mLeft = window.getWeaponMuzzleWorldPos(u, u._shotBarrelIdx % 2, _muzzleScratch2);
-                                    launchOrdProjectile(mLeft, target, 'battlecruiser_laser', Math.round(u.damage * 0.65), false);
-                                    const mRight = window.getWeaponMuzzleWorldPos(u, 2 + (u._shotBarrelIdx % 2), _muzzleScratch2);
-                                    launchOrdProjectile(mRight, target, 'battlecruiser_laser', Math.round(u.damage * 0.65), false);
-                                }
+                            if (u.type === 'void_ray' || u.type === 'carrier' || u.type === 'battlecruiser') {
+                                // Handled by dedicated Prismatic Beam, Autonomous Interceptor Squadron & Battlecruiser 4-Laser Battery systems above
                             } else if (u.type === 'heli') {
                                 launchOrdProjectile(muzzle, target, 'heli', u.damage, false);
                                 if (u._shotBarrelIdx % 3 === 0) {
@@ -13199,6 +13536,7 @@ function animate(now) {
                     }
                     if (u.healBeam) scene.remove(u.healBeam);
                     if (u.prismaticBeam) scene.remove(u.prismaticBeam);
+                    cleanupBattlecruiserLaserWeapons(u);
                     if (Array.isArray(u.interceptors)) {
                         for (let ii = 0; ii < u.interceptors.length; ii++) {
                             if (u.interceptors[ii] && u.interceptors[ii].mesh) {
@@ -13975,7 +14313,24 @@ function animate(now) {
     }
 
     if (perfProf) perfProf.begin('renderScene');
-    renderer.render(scene, camera);
+    if (window.SCENE_INTEGRITY_VALIDATOR && typeof window.SCENE_INTEGRITY_VALIDATOR.validateSceneGraph === 'function') {
+        const frameNum = perfProf ? perfProf.frameCount : 0;
+        if (window._forceSceneValidation || (frameNum % 45 === 0)) {
+            window._forceSceneValidation = false;
+            window.SCENE_INTEGRITY_VALIDATOR.validateSceneGraph(scene, 'pre-render');
+        }
+    }
+    try {
+        renderer.render(scene, camera);
+    } catch (renderErr) {
+        if (window.SCENE_INTEGRITY_VALIDATOR && typeof window.SCENE_INTEGRITY_VALIDATOR.validateSceneGraph === 'function') {
+            window.SCENE_INTEGRITY_VALIDATOR.validateSceneGraph(scene, 'render-exception-recovery');
+        }
+        if (window.APP_ERROR_HANDLER) window.APP_ERROR_HANDLER.record('renderer.render', renderErr, 'graphics');
+        try {
+            renderer.render(scene, camera);
+        } catch (_) {}
+    }
     if (perfProf) {
         perfProf.end('renderScene');
         perfProf.endFrame(renderer, {
@@ -13988,7 +14343,9 @@ function animate(now) {
     }
     } catch (err) {
         if (window.APP_ERROR_HANDLER) window.APP_ERROR_HANDLER.record('animate', err);
-        try { renderer.render(scene, camera); } catch (_) {}
+        if (window.SCENE_INTEGRITY_VALIDATOR && typeof window.SCENE_INTEGRITY_VALIDATOR.validateSceneGraph === 'function') {
+            window.SCENE_INTEGRITY_VALIDATOR.validateSceneGraph(scene, 'animate-catch');
+        }
     }
 }
 
@@ -13998,97 +14355,374 @@ window.addEventListener('resize', () => {
     renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// Spawns real, functioning Faction Bases at BASE_TERRAIN_ZONES for all added AI/Players from the Multiplayer/Skirmish Lobby!
-// Strictly groups Friendly Allies (Team 1) in our corner near PLAYER_START_POS and places Hostile AI Enemies FAR AWAY (>= 100m)!
+// ============================================================================
+// MULTIPLAYER CONFIGURATION VALIDATION & DYNAMIC PARTICIPANT ROSTER INITIALIZER
+// Single source of truth for multiplayer match participants, teams, factions & AI
+// ============================================================================
+function normalizeMultiplayerFaction(rawFaction) {
+    const f = String(rawFaction || '').trim().toLowerCase();
+    if (f === 'terran' || f.includes('terran') || f.includes('dominion')) return 'terran';
+    if (f === 'protoss' || f === 'solaris' || f.includes('protoss') || f.includes('solaris') || f.includes('synod')) return 'protoss';
+    if (f === 'zerg' || f.includes('zerg') || f.includes('swarm') || f.includes('xeno')) return 'zerg';
+    return '';
+}
+
+function normalizeAiDifficulty(rawDiff) {
+    const d = String(rawDiff || '').trim().toLowerCase();
+    if (d === 'easy') return 'Easy';
+    if (d === 'medium' || d === 'normal') return 'Medium';
+    if (d === 'hard') return 'Hard';
+    if (d === 'brutal' || d === 'insane') return 'Brutal';
+    return '';
+}
+
+window.validateAndBuildMultiplayerRoster = function(lobbyConfig) {
+    const errors = [];
+    if (!lobbyConfig || typeof lobbyConfig !== 'object') {
+        return { valid: false, errors: ['Missing lobby configuration object.'], roster: [] };
+    }
+
+    const rawSlots = Array.isArray(lobbyConfig.slots)
+        ? lobbyConfig.slots
+        : (Array.isArray(lobbyConfig.lobbyPlayers) ? lobbyConfig.lobbyPlayers : []);
+
+    if (rawSlots.length < 2) {
+        errors.push(`Invalid participant count (${rawSlots.length}). At least 2 participants are required.`);
+    }
+
+    const roster = [];
+    const distinctTeams = new Set();
+    let humanCount = 0;
+
+    for (let i = 0; i < rawSlots.length; i++) {
+        const s = rawSlots[i];
+        if (!s || typeof s !== 'object') {
+            errors.push(`Slot #${i + 1} is null or malformed.`);
+            continue;
+        }
+        const slotId = String(s.slotId || s.id || `slot_${i + 1}`);
+        const playerId = String(s.playerId || s.id || slotId);
+        const type = (s.type === 'ai' || s.isBot === true) ? 'ai' : ((s.type === 'human' || s.isBot === false) ? 'human' : '');
+        if (type !== 'human' && type !== 'ai') {
+            errors.push(`Slot "${slotId}" has invalid participant type "${s.type}".`);
+        }
+        if (type === 'human') humanCount++;
+
+        const teamId = Number(s.teamId !== undefined ? s.teamId : s.team);
+        if (!Number.isInteger(teamId) || teamId < 1 || teamId > 8) {
+            errors.push(`Slot "${slotId}" has invalid team assignment (${s.teamId ?? s.team}).`);
+        } else {
+            distinctTeams.add(teamId);
+        }
+
+        const faction = normalizeMultiplayerFaction(s.faction);
+        if (!faction) {
+            errors.push(`Slot "${slotId}" has invalid faction "${s.faction}".`);
+        }
+
+        let aiDifficulty = null;
+        if (type === 'ai') {
+            aiDifficulty = normalizeAiDifficulty(s.aiDifficulty || s.difficulty || lobbyConfig.botDifficulty || 'Medium');
+            if (!aiDifficulty) {
+                errors.push(`AI slot "${slotId}" has invalid difficulty "${s.aiDifficulty || s.difficulty}".`);
+            }
+        }
+
+        roster.push({
+            slotId,
+            playerId,
+            name: String(s.name || (type === 'ai' ? `AI Commander ${i + 1}` : `Commander ${i + 1}`)),
+            type,
+            teamId,
+            team: teamId,
+            isBot: type === 'ai',
+            faction,
+            aiDifficulty,
+            isLocalHuman: Boolean(s.isLocalHuman || (type === 'human' && (s.playerId === lobbyConfig.localPlayerId || humanCount === 1)))
+        });
+    }
+
+    if (humanCount < 1) {
+        errors.push('At least 1 human player is required in the lobby roster.');
+    }
+    if (distinctTeams.size < 2) {
+        errors.push('At least 2 opposing teams are required to start a match.');
+    }
+    if (roster.length !== rawSlots.length) {
+        errors.push('Generated participant roster length does not match lobby slots.');
+    }
+
+    return {
+        valid: errors.length === 0,
+        errors,
+        roster,
+        teamCount: distinctTeams.size,
+        humanCount,
+        aiCount: roster.filter(r => r.type === 'ai').length
+    };
+};
+
+// Spawns ONLY the exact participants from the validated roster (no unrequested Solaris allies or default extras)
 function spawnLobbyExpansionBases(lobbyPlayers) {
-    if (!Array.isArray(lobbyPlayers) || lobbyPlayers.length <= 2) return;
+    if (!Array.isArray(lobbyPlayers) || lobbyPlayers.length === 0) return;
+
+    const validation = window.validateAndBuildMultiplayerRoster({ slots: lobbyPlayers });
+    const roster = validation.roster.length > 0 ? validation.roster : lobbyPlayers;
+    const localHuman = roster.find(p => p.type === 'human' && p.isLocalHuman) || roster.find(p => p.type === 'human') || roster[0];
+    const localTeamId = localHuman ? (localHuman.teamId || localHuman.team || 1) : 1;
+
+    const alliedParticipants = roster.filter(p => p !== localHuman && (p.teamId || p.team) === localTeamId);
+    const hostileParticipants = roster.filter(p => (p.teamId || p.team) !== localTeamId);
+
+    state.isMultiplayerMatch = true;
+    state.hasAlliedAiCommander = alliedParticipants.length > 0;
+    state.playerTeamId = localTeamId;
+    state.activeMultiplayerRoster = roster;
+
+    // 1. If 0 allied AI/players are on the human player's team, ensure 0 Solaris ally structures/units exist!
+    solarisBuildings.forEach(sb => {
+        if (sb && sb.mesh) scene.remove(sb.mesh);
+        if (sb && sb.hb && sb.hb.root) sb.hb.root.remove();
+    });
+    solarisBuildings.length = 0;
+    for (let ui = units.length - 1; ui >= 0; ui--) {
+        const u = units[ui];
+        if (u && u.isSolarisAllyUnit) {
+            if (u.mesh) scene.remove(u.mesh);
+            if (u.hb && u.hb.root) u.hb.root.remove();
+            units.splice(ui, 1);
+        }
+    }
+
+    // 2. Rebuild enemyBuildings strictly from hostileParticipants (never hardcode counts, teams, or factions)
+    enemyBuildings.forEach(eb => {
+        if (eb && eb.mesh) scene.remove(eb.mesh);
+        if (eb && eb.expCreepMesh) scene.remove(eb.expCreepMesh);
+        if (eb && eb.badge) eb.badge.remove();
+        if (eb && eb.hb && eb.hb.root) eb.hb.root.remove();
+    });
+    enemyBuildings.length = 0;
+    enemies.forEach(e => {
+        if (e && e.mesh) scene.remove(e.mesh);
+        if (e && e.hb && e.hb.root) e.hb.root.remove();
+    });
+    enemies.length = 0;
+    state.enemyBase = null;
+
+    // Candidate world positions for hostile and allied bases
     const zones = Array.isArray(window.BASE_TERRAIN_ZONES) ? window.BASE_TERRAIN_ZONES : [];
     const expansionZones = zones.filter(z => z && z.id && (z.id.startsWith('faction_expansion_') || z.id.startsWith('corner_ramp_platform_')));
-    if (expansionZones.length === 0) return;
-
     const usedZoneIds = new Set();
-    // Filter extra commanders beyond the primary human host and primary Zerg Hive
-    const extraCommanders = lobbyPlayers.slice(1);
-    for (let i = 0; i < extraCommanders.length; i++) {
-        const cmdr = extraCommanders[i];
-        if (!cmdr) continue;
-        const isAlly = (cmdr.team === 1);
 
-        // Sort available platforms by distance to PLAYER_START_POS:
-        // - Allied Team 1 commanders pick platforms CLOSEST to PLAYER_START_POS (grouped team in our corner!)
-        // - Hostile AI Enemies pick platforms FARTHEST from PLAYER_START_POS (never spawning near us!)
-        const availableZones = expansionZones
-            .filter(z => !usedZoneIds.has(z.id))
-            .filter(z => {
-                const distToPlayer = Math.hypot(z.x - PLAYER_START_POS.x, z.z - PLAYER_START_POS.z);
-                return isAlly ? (distToPlayer < 125.0) : (distToPlayer >= 92.0);
-            })
-            .sort((a, b) => {
-                const da = Math.hypot(a.x - PLAYER_START_POS.x, a.z - PLAYER_START_POS.z);
-                const db = Math.hypot(b.x - PLAYER_START_POS.x, b.z - PLAYER_START_POS.z);
-                return isAlly ? (da - db) : (db - da);
-            });
+    // Primary hostile spawn anchor is ENEMY_BASE_POS; additional hostile slots use distinct far expansion zones
+    const hostileSpawnCoords = [
+        { x: ENEMY_BASE_POS.x, z: ENEMY_BASE_POS.z, id: 'primary_enemy_base' }
+    ];
+    const sortedFarZones = expansionZones
+        .slice()
+        .sort((a, b) => Math.hypot(b.x - PLAYER_START_POS.x, b.z - PLAYER_START_POS.z) - Math.hypot(a.x - PLAYER_START_POS.x, a.z - PLAYER_START_POS.z));
+    for (let zi = 0; zi < sortedFarZones.length; zi++) {
+        const z = sortedFarZones[zi];
+        if (Math.hypot(z.x - ENEMY_BASE_POS.x, z.z - ENEMY_BASE_POS.z) > 18.0 && Math.hypot(z.x - PLAYER_START_POS.x, z.z - PLAYER_START_POS.z) > 45.0) {
+            hostileSpawnCoords.push({ x: z.x, z: z.z, id: z.id });
+        }
+    }
+    if (typeof SOLARIS_BASE_POS !== 'undefined' && alliedParticipants.length === 0) {
+        hostileSpawnCoords.push({ x: SOLARIS_BASE_POS.x, z: SOLARIS_BASE_POS.z, id: 'solaris_sector_anchor' });
+    }
 
-        const ez = availableZones[0];
-        if (!ez) continue;
-        usedZoneIds.add(ez.id);
+    const diffMultiplierMap = { Easy: 0.85, Medium: 1.0, Hard: 1.20, Brutal: 1.45 };
 
-        const basePos = new THREE.Vector3(ez.x, getTerrainHeight(ez.x, ez.z), ez.z);
+    for (let hi = 0; hi < hostileParticipants.length; hi++) {
+        const cmdr = hostileParticipants[hi];
+        const coord = hostileSpawnCoords[hi % hostileSpawnCoords.length] || {
+            x: ENEMY_BASE_POS.x + (hi * 22.0),
+            z: ENEMY_BASE_POS.z - (hi * 16.0),
+            id: `hostile_fallback_${hi}`
+        };
+        usedZoneIds.add(coord.id);
+
+        const basePos = resolveSafeEnemyBuildingPos(new THREE.Vector3(coord.x, getTerrainHeight(coord.x, coord.z), coord.z), 3.2, true);
         if (typeof window.flattenTerrainUnderBuilding === 'function') {
             basePos.y = window.flattenTerrainUnderBuilding(basePos.x, basePos.z, 3.8, 2.2);
         }
 
-        const fac = String(cmdr.faction || '').toLowerCase();
+        const fac = normalizeMultiplayerFaction(cmdr.faction) || 'zerg';
+        const diffKey = normalizeAiDifficulty(cmdr.aiDifficulty || cmdr.difficulty || 'Medium') || 'Medium';
+        const hpMult = diffMultiplierMap[diffKey] || 1.0;
+        const spawnRateMult = diffKey === 'Brutal' ? 0.72 : (diffKey === 'Hard' ? 0.85 : (diffKey === 'Easy' ? 1.20 : 1.0));
 
-        if (!isAlly) {
-            // Hostile AI / Player Expansion Base (Team 2 or FFA - strictly far from Player corner! Starts with MAIN BASE ONLY!)
-            if (fac.includes('zerg')) {
-                let expCreepMesh = null;
-                if (typeof window.spawnZergExpansionCreepBlanket === 'function') {
-                    expCreepMesh = window.spawnZergExpansionCreepBlanket(basePos.x, basePos.z, 13.5);
-                }
-                const citMesh = createLeviathanCitadel();
-                citMesh.position.copy(basePos);
-                scene.add(citMesh);
-                const cBadge = document.createElement('div'); cBadge.style.display = 'none';
-                const cHb = makeHealthPip('#ff2a4b', true);
-                enemyBuildings.push({
-                    role: 'citadel', isExpansionCitadel: true, expCreepMesh,
-                    mesh: citMesh, pos: basePos.clone(),
-                    footprintRadius: 3.4, hp: 2800, maxHp: 2800, buildProgress: 1.0, badge: cBadge, hb: cHb
-                });
-            } else {
-                // Hostile Protoss or Terran Commander Base added in Lobby (Main Base Only at Start!)
-                const isProtoss = fac.includes('protoss') || fac.includes('solaris');
-                const hqMesh = createEngineeredBuilding(isProtoss ? 'solaris_nexus' : 'base', false);
-                hqMesh.position.copy(basePos);
-                scene.add(hqMesh);
-                const hBadge = document.createElement('div'); hBadge.style.display = 'none';
-                enemyBuildings.push({
-                    role: 'citadel', isExpansionCitadel: true,
-                    mesh: hqMesh, pos: basePos.clone(),
-                    footprintRadius: 3.1, hp: 2600, maxHp: 2600, buildProgress: 1.0,
-                    badge: hBadge, hb: makeHealthPip('#ff5400', true)
-                });
+        let hqMesh;
+        let expCreepMesh = null;
+        if (fac === 'zerg') {
+            hqMesh = createLeviathanCitadel();
+            if (hi > 0 && typeof window.spawnZergExpansionCreepBlanket === 'function') {
+                expCreepMesh = window.spawnZergExpansionCreepBlanket(basePos.x, basePos.z, 13.5);
             }
+        } else if (fac === 'protoss') {
+            hqMesh = createEngineeredBuilding('solaris_nexus', false);
         } else {
-            // Allied AI / Player Expansion Base (Team 1 - Starts with Main Nexus/HQ Only!)
-            const isTerranAlly = fac.includes('terran');
-            const allyHqType = isTerranAlly ? 'base' : 'solaris_nexus';
+            hqMesh = createEngineeredBuilding('base', false);
+        }
+        hqMesh.position.copy(basePos);
+        scene.add(hqMesh);
 
+        const cBadge = document.createElement('div');
+        cBadge.style.display = 'none';
+        const pipColor = fac === 'zerg' ? '#ff2a4b' : (fac === 'protoss' ? '#f5b932' : '#ff5400');
+        const hqMaxHp = Math.round(2800 * hpMult);
+        const hqEntry = {
+            role: 'citadel',
+            slotId: cmdr.slotId,
+            playerId: cmdr.playerId,
+            commanderName: cmdr.name,
+            faction: fac,
+            teamId: cmdr.teamId || cmdr.team || 2,
+            aiDifficulty: diffKey,
+            isExpansionCitadel: hi > 0,
+            expCreepMesh,
+            mesh: hqMesh,
+            pos: basePos.clone(),
+            footprintRadius: 3.3,
+            hp: hqMaxHp,
+            maxHp: hqMaxHp,
+            buildProgress: 1.0,
+            badge: cBadge,
+            hb: makeHealthPip(pipColor, true)
+        };
+        enemyBuildings.push(hqEntry);
+        if (hi === 0) {
+            state.enemyBase = hqEntry;
+            ENEMY_BASE_POS.copy(basePos);
+        }
+
+        // Spawn 1 faction production building per hostile commander so each configured AI actively produces units
+        const prodOffset = new THREE.Vector3(basePos.x + (hi % 2 === 0 ? 5.2 : -5.2), 0, basePos.z + 6.5);
+        const prodPos = resolveSafeEnemyBuildingPos(prodOffset, 2.8, true, basePos, 20.0);
+        if (typeof window.flattenTerrainUnderBuilding === 'function') {
+            prodPos.y = window.flattenTerrainUnderBuilding(prodPos.x, prodPos.z, 3.2, 1.8);
+        }
+        let prodMesh;
+        if (fac === 'zerg') prodMesh = createEnemySpawningPool();
+        else if (fac === 'protoss') prodMesh = createEngineeredBuilding('solaris_gate', false);
+        else prodMesh = createEngineeredBuilding('barracks', false);
+        prodMesh.position.copy(prodPos);
+        scene.add(prodMesh);
+        const pBadge = document.createElement('div');
+        pBadge.style.display = 'none';
+        const prodMaxHp = Math.round(1300 * hpMult);
+        enemyBuildings.push({
+            role: 'barracks',
+            slotId: cmdr.slotId,
+            playerId: cmdr.playerId,
+            commanderName: cmdr.name,
+            faction: fac,
+            teamId: cmdr.teamId || cmdr.team || 2,
+            aiDifficulty: diffKey,
+            bpIdx: hi,
+            mesh: prodMesh,
+            pos: prodPos.clone(),
+            footprintRadius: 2.8,
+            hp: prodMaxHp,
+            maxHp: prodMaxHp,
+            buildProgress: 1.0,
+            badge: pBadge,
+            hb: makeHealthPip(pipColor, true),
+            spawnTimer: 3.5 * spawnRateMult,
+            spawnDuration: 6.5 * spawnRateMult,
+            cooldown: 0.8
+        });
+    }
+
+    // 3. Spawn Allied AI bases ONLY if allied AI slots were explicitly configured on the human player's team
+    if (alliedParticipants.length > 0) {
+        const alliedCoords = [];
+        if (typeof SOLARIS_BASE_POS !== 'undefined') {
+            alliedCoords.push({ x: SOLARIS_BASE_POS.x, z: SOLARIS_BASE_POS.z });
+        }
+        const sortedNearZones = expansionZones
+            .filter(z => !usedZoneIds.has(z.id))
+            .sort((a, b) => Math.hypot(a.x - PLAYER_START_POS.x, a.z - PLAYER_START_POS.z) - Math.hypot(b.x - PLAYER_START_POS.x, b.z - PLAYER_START_POS.z));
+        for (let zi = 0; zi < sortedNearZones.length; zi++) {
+            alliedCoords.push({ x: sortedNearZones[zi].x, z: sortedNearZones[zi].z });
+        }
+
+        for (let ai = 0; ai < alliedParticipants.length; ai++) {
+            const allyCmdr = alliedParticipants[ai];
+            const ac = alliedCoords[ai % alliedCoords.length] || { x: PLAYER_START_POS.x - 18.0, z: PLAYER_START_POS.z - 12.0 };
+            const allyPos = resolveSafeEnemyBuildingPos(new THREE.Vector3(ac.x, getTerrainHeight(ac.x, ac.z), ac.z), 3.0, true);
+            if (typeof window.flattenTerrainUnderBuilding === 'function') {
+                allyPos.y = window.flattenTerrainUnderBuilding(allyPos.x, allyPos.z, 3.6, 2.0);
+            }
+            const allyFac = normalizeMultiplayerFaction(allyCmdr.faction) || 'protoss';
+            const allyHqType = allyFac === 'terran' ? 'base' : 'solaris_nexus';
             const hqMesh = createEngineeredBuilding(allyHqType, false);
-            hqMesh.position.copy(basePos);
+            hqMesh.position.copy(allyPos);
             scene.add(hqMesh);
             solarisBuildings.push({
-                type: allyHqType, role: 'nexus', bpIdx: 10 + i,
-                mesh: hqMesh, pos: basePos.clone(), footprintRadius: 2.8,
-                hp: 2200, maxHp: 2200, shield: 900, maxShield: 900, shieldRegenDelay: 0,
-                buildProgress: 1.0, hb: makeHealthPip('#00e5ff', true),
-                spawnTimer: 9.0, spawnDuration: 12.0
+                type: allyHqType,
+                role: 'nexus',
+                slotId: allyCmdr.slotId,
+                playerId: allyCmdr.playerId,
+                commanderName: allyCmdr.name,
+                faction: allyFac,
+                teamId: allyCmdr.teamId || allyCmdr.team || localTeamId,
+                aiDifficulty: normalizeAiDifficulty(allyCmdr.aiDifficulty || allyCmdr.difficulty || 'Medium') || 'Medium',
+                bpIdx: ai,
+                mesh: hqMesh,
+                pos: allyPos.clone(),
+                footprintRadius: 2.8,
+                hp: 2400,
+                maxHp: 2400,
+                shield: allyFac === 'protoss' ? 1200 : 0,
+                maxShield: allyFac === 'protoss' ? 1200 : 0,
+                shieldRegenDelay: 0,
+                buildProgress: 1.0,
+                hb: makeHealthPip('#00e5ff', true),
+                spawnTimer: 8.5,
+                spawnDuration: 12.0
             });
         }
     }
 }
+
+window.initializeMultiplayerMatchFromRoster = function(lobbyConfig) {
+    const validation = window.validateAndBuildMultiplayerRoster(lobbyConfig);
+    if (!validation.valid) {
+        return validation;
+    }
+    const roster = validation.roster;
+    window.CUSTOM_LOBBY_PLAYERS = roster;
+
+    const localHuman = roster.find(p => p.type === 'human' && p.isLocalHuman) || roster.find(p => p.type === 'human') || roster[0];
+    const alliedAi = roster.filter(p => p !== localHuman && p.teamId === localHuman.teamId);
+    const hostileCmdrs = roster.filter(p => p.teamId !== localHuman.teamId);
+
+    state.isMultiplayerMatch = true;
+    state.hasAlliedAiCommander = alliedAi.length > 0;
+    state.playerTeamId = localHuman.teamId;
+    state.playerFaction = localHuman.faction === 'protoss' ? 'solaris' : 'terran';
+    state.aiAllyMode = alliedAi.length > 0 ? 'defensive' : 'off';
+
+    const badge = document.getElementById('mode-badge');
+    if (badge) {
+        badge.innerText = state.playerFaction === 'solaris' ? 'SOLARIS PROTOSS' : 'TERRAN DOMINION';
+    }
+
+    spawnLobbyExpansionBases(roster);
+
+    return {
+        valid: true,
+        errors: [],
+        roster,
+        localPlayer: localHuman,
+        alliedCount: alliedAi.length,
+        hostileCount: hostileCmdrs.length,
+        solarisBuildingsCount: solarisBuildings.length,
+        enemyCitadelsCount: enemyBuildings.filter(eb => eb.role === 'citadel').length,
+        enemyBuildingsCount: enemyBuildings.length
+    };
+};
 
 // Expose Playtest & Game Shell API for React HUD
 window.GAME_API = {
@@ -14133,21 +14767,32 @@ window.GAME_API = {
         if (window.BATTLE_CINEMATIC && typeof window.BATTLE_CINEMATIC.cleanup === 'function') {
             window.BATTLE_CINEMATIC.cleanup();
         }
+        const hasMpRoster = Boolean(config && (Array.isArray(config.slots) || Array.isArray(config.lobbyPlayers)) && (config.slots || config.lobbyPlayers).length >= 2);
         if (config && typeof config === 'object') {
             state.multiplayerConfig = config;
             if (config.startingMinerals && typeof config.startingMinerals === 'number') {
                 state.req = config.startingMinerals;
             }
-            if (config.aiAllyMode) {
-                state.aiAllyMode = config.aiAllyMode;
-                syncAiAllyButtons();
+            if (hasMpRoster) {
+                const mpInit = window.initializeMultiplayerMatchFromRoster(config);
+                if (!mpInit.valid) {
+                    console.error('[MultiplayerMatchInit] Invalid roster configuration:', mpInit.errors);
+                    return mpInit;
+                }
+            } else {
+                state.isMultiplayerMatch = false;
+                state.hasAlliedAiCommander = true;
+                if (config.aiAllyMode) {
+                    state.aiAllyMode = config.aiAllyMode;
+                    syncAiAllyButtons();
+                }
             }
+        } else {
+            state.isMultiplayerMatch = false;
+            state.hasAlliedAiCommander = true;
         }
-        if (!state.enemyBase || enemyBuildings.length === 0) {
+        if (!hasMpRoster && (!state.enemyBase || enemyBuildings.length === 0)) {
             initEnemyHiveCluster();
-        }
-        if (config && Array.isArray(config.lobbyPlayers) && config.lobbyPlayers.length > 2) {
-            spawnLobbyExpansionBases(config.lobbyPlayers);
         }
         if (config && config.autoDeployBase && !state.basePlaced) {
             deployBaseAtBarrier(selectedBaseBarrierId || 'alpha');
@@ -14535,6 +15180,7 @@ window.resetMatchForNewMap = function(newSeed) {
         if (u.mesh) scene.remove(u.mesh);
         if (u.healBeam) scene.remove(u.healBeam);
         if (u.prismaticBeam) scene.remove(u.prismaticBeam);
+        cleanupBattlecruiserLaserWeapons(u);
         if (Array.isArray(u.interceptors)) {
             u.interceptors.forEach(ic => { if (ic && ic.mesh) scene.remove(ic.mesh); });
             u.interceptors.length = 0;
@@ -14652,9 +15298,10 @@ window.resetMatchForNewMap = function(newSeed) {
     state.enemyBase = null;
     creepRadius = 16.5;
     creepTargetRadius = 21.0;
-    initEnemyHiveCluster();
-    if (Array.isArray(window.CUSTOM_LOBBY_PLAYERS) && window.CUSTOM_LOBBY_PLAYERS.length > 2) {
+    if (Array.isArray(window.CUSTOM_LOBBY_PLAYERS) && window.CUSTOM_LOBBY_PLAYERS.length >= 2) {
         spawnLobbyExpansionBases(window.CUSTOM_LOBBY_PLAYERS);
+    } else {
+        initEnemyHiveCluster();
     }
     if (typeof updateZergCreepColors === 'function') {
         updateZergCreepColors(creepRadius, false, true);

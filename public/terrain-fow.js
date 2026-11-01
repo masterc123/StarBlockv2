@@ -185,9 +185,11 @@ function getBaseZoneRampMetrics(zone, x, z) {
 }
 window.getBaseZoneRampMetrics = getBaseZoneRampMetrics;
 
-const RIVER_HALF_WIDTH = 3.35;
-const RIVER_WATER_Y = -0.20;
-const WATER_LEVEL = RIVER_WATER_Y;
+let RIVER_HALF_WIDTH = 3.35;
+let RIVER_WATER_Y = -0.20;
+let WATER_LEVEL = RIVER_WATER_Y;
+window.RIVER_HALF_WIDTH = RIVER_HALF_WIDTH;
+window.RIVER_WATER_Y = RIVER_WATER_Y;
 window.WATER_LEVEL = WATER_LEVEL;
 const RIVER_BRIDGES = [];
 window.RIVER_BRIDGES = RIVER_BRIDGES;
@@ -571,6 +573,36 @@ function generateProceduralTopographyParameters(customSeed) {
     RIVER_COS = Math.cos(RIVER_ANGLE);
     RIVER_SIN = Math.sin(RIVER_ANGLE);
 
+    // Reset river width & water elevation defaults before biome-specific overrides
+    RIVER_HALF_WIDTH = ACTIVE_PLANET_BIOME === 'lava' ? 4.55 : 3.35;
+    RIVER_WATER_Y = -0.20;
+    WATER_LEVEL = RIVER_WATER_Y;
+    window.RIVER_HALF_WIDTH = RIVER_HALF_WIDTH;
+    window.RIVER_WATER_Y = RIVER_WATER_Y;
+    window.WATER_LEVEL = WATER_LEVEL;
+
+    // Place Enemy Barracks/Factory and 3rd Faction (Solaris Chrono-Synod Allied Enclave) BEFORE archipelago/fissure generation!
+    const enemyInwardAng = Math.atan2(-ENEMY_BASE_POS.z, -ENEMY_BASE_POS.x);
+    ENEMY_BARRACKS_POS.set(
+        ENEMY_BASE_POS.x + Math.cos(enemyInwardAng - 0.52) * 12.2,
+        0,
+        ENEMY_BASE_POS.z + Math.sin(enemyInwardAng - 0.52) * 12.2
+    );
+    ENEMY_FACTORY_POS.set(
+        ENEMY_BASE_POS.x + Math.cos(enemyInwardAng + 0.52) * 12.2,
+        0,
+        ENEMY_BASE_POS.z + Math.sin(enemyInwardAng + 0.52) * 12.2
+    );
+
+    const allyFlankSign = seededRandom() > 0.5 ? 1 : -1;
+    const solarisSectorAng = playerSectorAng + allyFlankSign * (0.52 + seededRandom() * 0.16);
+    const solarisDist = 62.0 + seededRandom() * 14.0;
+    SOLARIS_BASE_POS.set(
+        THREE.MathUtils.clamp(Math.round(Math.cos(solarisSectorAng) * solarisDist), -80, 80),
+        0,
+        THREE.MathUtils.clamp(Math.round(Math.sin(solarisSectorAng) * solarisDist), -80, 80)
+    );
+
     window.OCEAN_ISLANDS = [];
     window.LAVA_FISSURES = [];
 
@@ -578,8 +610,12 @@ function generateProceduralTopographyParameters(customSeed) {
         HAS_VALLEY_RIVER = true;
         RIVER_HALF_WIDTH = 14.5;
         RIVER_WATER_Y = -0.18;
+        WATER_LEVEL = RIVER_WATER_Y;
+        window.RIVER_HALF_WIDTH = RIVER_HALF_WIDTH;
+        window.RIVER_WATER_Y = RIVER_WATER_Y;
+        window.WATER_LEVEL = WATER_LEVEL;
 
-        // Multi-island archipelago: 4 major strategic islands + 5 surrounding satellite islands/atolls
+        // Multi-island archipelago: 5 large strategic islands + 6 smaller satellite islands/atolls
         const makeArchipelagoIsland = (id, x, z, rx, rz, rot, peakH, isMajor = false) => ({
             id, x, z, rx, rz,
             cosR: Math.cos(rot),
@@ -588,46 +624,56 @@ function generateProceduralTopographyParameters(customSeed) {
             isMajor,
             lobePhase1: seededRandom() * Math.PI * 2,
             lobePhase2: seededRandom() * Math.PI * 2,
+            lobePhase3: seededRandom() * Math.PI * 2,
             coveAngle: seededRandom() * Math.PI * 2
         });
 
-        const centralX = (seededRandom() - 0.5) * 6.0;
-        const centralZ = (seededRandom() - 0.5) * 6.0;
+        const centralX = Math.round((seededRandom() - 0.5) * 8.0);
+        const centralZ = Math.round((seededRandom() - 0.5) * 8.0);
+        const oppFlankX = THREE.MathUtils.clamp(-SOLARIS_BASE_POS.x + Math.round((seededRandom() - 0.5) * 8.0), -78, 78);
+        const oppFlankZ = THREE.MathUtils.clamp(-SOLARIS_BASE_POS.z + Math.round((seededRandom() - 0.5) * 8.0), -78, 78);
+
         window.OCEAN_ISLANDS.push(
-            makeArchipelagoIsland('island_player', PLAYER_START_POS.x, PLAYER_START_POS.z, 32.0, 29.5, seededRandom() * Math.PI, 1.05, true),
-            makeArchipelagoIsland('island_enemy', ENEMY_BASE_POS.x, ENEMY_BASE_POS.z, 33.0, 30.0, seededRandom() * Math.PI, 0.95, true),
-            makeArchipelagoIsland('island_solaris', SOLARIS_BASE_POS.x, SOLARIS_BASE_POS.z, 26.5, 24.5, seededRandom() * Math.PI, 0.92, true),
-            makeArchipelagoIsland('island_central', centralX, centralZ, 24.5, 22.0, seededRandom() * Math.PI, 1.25, true)
+            makeArchipelagoIsland('island_player', PLAYER_START_POS.x, PLAYER_START_POS.z, 31.0, 28.5, seededRandom() * Math.PI, 1.25, true),
+            makeArchipelagoIsland('island_enemy', ENEMY_BASE_POS.x, ENEMY_BASE_POS.z, 31.5, 29.0, seededRandom() * Math.PI, 1.20, true),
+            makeArchipelagoIsland('island_solaris', SOLARIS_BASE_POS.x, SOLARIS_BASE_POS.z, 26.5, 24.5, seededRandom() * Math.PI, 1.15, true),
+            makeArchipelagoIsland('island_central', centralX, centralZ, 24.5, 22.5, seededRandom() * Math.PI, 1.45, true),
+            makeArchipelagoIsland('island_flank', oppFlankX, oppFlankZ, 24.0, 22.0, seededRandom() * Math.PI, 1.18, true)
         );
 
-        const satCoords = [
-            [-58, -12, 18.5, 15.0, 1.15],
-            [58, 12, 18.5, 15.5, 1.10],
-            [-14, 58, 17.5, 14.5, 0.95],
-            [16, -58, 17.5, 14.5, 0.98],
-            [-54, -56, 16.0, 14.0, 0.88]
+        const satCandidates = [
+            [(PLAYER_START_POS.x + SOLARIS_BASE_POS.x) * 0.52, (PLAYER_START_POS.z + SOLARIS_BASE_POS.z) * 0.52, 16.5, 14.0, 1.05],
+            [(ENEMY_BASE_POS.x + oppFlankX) * 0.52, (ENEMY_BASE_POS.z + oppFlankZ) * 0.52, 16.5, 14.0, 1.08],
+            [(PLAYER_START_POS.x + oppFlankX) * 0.52, (PLAYER_START_POS.z + oppFlankZ) * 0.52, 17.5, 15.0, 1.12],
+            [(ENEMY_BASE_POS.x + SOLARIS_BASE_POS.x) * 0.52, (ENEMY_BASE_POS.z + SOLARIS_BASE_POS.z) * 0.52, 17.5, 15.0, 1.10],
+            [-78, 0, 15.5, 13.5, 0.96],
+            [78, 0, 15.5, 13.5, 0.98],
+            [0, -82, 15.0, 13.0, 0.94],
+            [0, 82, 15.0, 13.0, 0.95]
         ];
-        satCoords.forEach(([sx, sz, srx, srz, sh], idx) => {
-            const jx = sx + (seededRandom() - 0.5) * 7.0;
-            const jz = sz + (seededRandom() - 0.5) * 7.0;
-            const clearMajor = window.OCEAN_ISLANDS.every(isl => Math.hypot(jx - isl.x, jz - isl.z) > (isl.rx + srx - 4.0));
-            if (clearMajor) {
+        satCandidates.forEach(([sx, sz, srx, srz, sh], idx) => {
+            const jx = THREE.MathUtils.clamp(Math.round(sx + (seededRandom() - 0.5) * 6.0), -94, 94);
+            const jz = THREE.MathUtils.clamp(Math.round(sz + (seededRandom() - 0.5) * 6.0), -94, 94);
+            const clearExisting = window.OCEAN_ISLANDS.every(isl => Math.hypot(jx - isl.x, jz - isl.z) > (Math.max(isl.rx, isl.rz) + Math.max(srx, srz) - 3.5));
+            if (clearExisting) {
                 window.OCEAN_ISLANDS.push(
                     makeArchipelagoIsland(`island_sat_${idx + 1}`, jx, jz, srx, srz, seededRandom() * Math.PI, sh, false)
                 );
             }
         });
 
-        // Build 4 long Terran-engineered inter-island bridges spanning the ocean channels between islands
+        // Build long Terran-engineered inter-island causeway bridges spanning the deep ocean channels between islands
         const createIslandBridgeLink = (islA, islB, bIdx, archType) => {
+            if (!islA || !islB) return;
             const dx = islB.x - islA.x;
             const dz = islB.z - islA.z;
             const dist = Math.hypot(dx, dz) || 1.0;
             const dirX = dx / dist;
             const dirZ = dz / dist;
 
-            const shoreA = Math.min(islA.rx, islA.rz) * 0.70;
-            const shoreB = Math.min(islB.rx, islB.rz) * 0.70;
+            // Place bridge abutments well inside each island's coastal shelf so ramps land on dry ground
+            const shoreA = Math.min(islA.rx, islA.rz) * 0.62;
+            const shoreB = Math.min(islB.rx, islB.rz) * 0.62;
             const ax = islA.x + dirX * shoreA;
             const az = islA.z + dirZ * shoreA;
             const bx = islB.x - dirX * shoreB;
@@ -635,11 +681,11 @@ function generateProceduralTopographyParameters(customSeed) {
 
             const cx = (ax + bx) * 0.5;
             const cz = (az + bz) * 0.5;
-            const gapLen = Math.max(18.0, Math.hypot(bx - ax, bz - az));
-            const flatHalfSpan = gapLen * 0.5 + 1.8;
-            const rampReachU = flatHalfSpan + 4.8;
-            // bridgeLocalToWorld maps localU along (-sinYaw, cosYaw); set bridgeYaw so +localU points from B to A
-            const bridgeYaw = Math.atan2(dirX, -dirZ);
+            const gapLen = Math.max(16.0, Math.hypot(bx - ax, bz - az));
+            const flatHalfSpan = gapLen * 0.5 + 1.5;
+            const rampReachU = flatHalfSpan + 5.2;
+            // bridgeLocalToWorld maps localU along (sinYaw, cosYaw); set bridgeYaw = atan2(dirX, dirZ) so +localU points from A to B!
+            const bridgeYaw = Math.atan2(dirX, dirZ);
             const cosYaw = Math.cos(bridgeYaw);
             const sinYaw = Math.sin(bridgeYaw);
             const bHalfW = 4.9;
@@ -649,6 +695,8 @@ function generateProceduralTopographyParameters(customSeed) {
                 id: `bridge_${bIdx + 1}`,
                 index: bIdx,
                 isCustomIslandBridge: true,
+                islandAId: islA.id,
+                islandBId: islB.id,
                 sCoord: rcMid.s,
                 centerU: rcMid.u,
                 centerX: cx,
@@ -694,12 +742,12 @@ function generateProceduralTopographyParameters(customSeed) {
         const islEnemy = window.OCEAN_ISLANDS[1];
         const islSolaris = window.OCEAN_ISLANDS[2];
         const islCentral = window.OCEAN_ISLANDS[3];
+        const islFlank = window.OCEAN_ISLANDS[4];
         createIslandBridgeLink(islPlayer, islCentral, 0, 'truss_bridge');
         createIslandBridgeLink(islCentral, islEnemy, 1, 'industrial_girder');
         createIslandBridgeLink(islCentral, islSolaris, 2, 'concrete_causeway');
-        if (window.OCEAN_ISLANDS.length > 4) {
-            createIslandBridgeLink(islPlayer, window.OCEAN_ISLANDS[4], 3, 'truss_bridge');
-        }
+        createIslandBridgeLink(islCentral, islFlank, 3, 'truss_bridge');
+        createIslandBridgeLink(islPlayer, islSolaris, 4, 'concrete_causeway');
         BRIDGE_COUNT = RIVER_BRIDGES.length;
     } else if (HAS_VALLEY_RIVER) {
         BRIDGE_COUNT = 2 + (seededRandom() > 0.45 ? 1 : 0);
@@ -816,28 +864,6 @@ function generateProceduralTopographyParameters(customSeed) {
         });
     }
 
-    const enemyInwardAng = Math.atan2(-ENEMY_BASE_POS.z, -ENEMY_BASE_POS.x);
-    ENEMY_BARRACKS_POS.set(
-        ENEMY_BASE_POS.x + Math.cos(enemyInwardAng - 0.52) * 12.2,
-        0,
-        ENEMY_BASE_POS.z + Math.sin(enemyInwardAng - 0.52) * 12.2
-    );
-    ENEMY_FACTORY_POS.set(
-        ENEMY_BASE_POS.x + Math.cos(enemyInwardAng + 0.52) * 12.2,
-        0,
-        ENEMY_BASE_POS.z + Math.sin(enemyInwardAng + 0.52) * 12.2
-    );
-
-    // Place 3rd Faction (Solaris Chrono-Synod Allied Enclave) on a randomized flank relative to Player Start (~36m-44m away)
-    const allyFlankSign = seededRandom() > 0.5 ? 1 : -1;
-    const solarisSectorAng = playerSectorAng + allyFlankSign * (0.52 + seededRandom() * 0.16);
-    const solarisDist = 62.0 + seededRandom() * 14.0;
-    SOLARIS_BASE_POS.set(
-        THREE.MathUtils.clamp(Math.round(Math.cos(solarisSectorAng) * solarisDist), -80, 80),
-        0,
-        THREE.MathUtils.clamp(Math.round(Math.sin(solarisSectorAng) * solarisDist), -80, 80)
-    );
-
     // Dynamically orient the Player Base entrance direction toward the valley center / enemy!
     const baseRampAng = Math.atan2((ENEMY_BASE_POS.z * 0.35) - PLAYER_START_POS.z, (ENEMY_BASE_POS.x * 0.35) - PLAYER_START_POS.x);
     const dynamicRampAng = baseRampAng + (seededRandom() - 0.5) * 0.45;
@@ -845,124 +871,148 @@ function generateProceduralTopographyParameters(customSeed) {
     PLAYER_BASE_RAMP_DIR.z = Math.sin(dynamicRampAng);
 
     // Auto-generate Multi-Faction Base Terrain Archetypes ('flat_ramp', 'under_ramp', 'no_ramp')
-    // Plus Dynamically Generated Big Corner Ramp Platform Terrains at the 4 Sector Corners & Scattered Platform Bases!
     BASE_TERRAIN_ZONES.length = 0;
-    const baseModes = ['flat_ramp', 'under_ramp', 'flat_ramp'];
-    const pRoll = seededRandom();
-    PLAYER_BASE_TECTONIC_MODE = (MAP_ARCHETYPE === 'fortified_plateau')
-        ? 'flat_ramp'
-        : (pRoll < 0.72 ? 'flat_ramp' : (pRoll < 0.94 ? 'under_ramp' : 'no_ramp'));
-    HAS_BASE_PLATEAU_RAMP = (PLAYER_BASE_TECTONIC_MODE === 'flat_ramp' || PLAYER_BASE_TECTONIC_MODE === 'under_ramp');
-    window.HAS_BASE_PLATEAU_RAMP = HAS_BASE_PLATEAU_RAMP;
-    window.PLAYER_BASE_TECTONIC_MODE = PLAYER_BASE_TECTONIC_MODE;
+    if (ACTIVE_PLANET_BIOME === 'ocean') {
+        PLAYER_BASE_TECTONIC_MODE = 'no_ramp';
+        HAS_BASE_PLATEAU_RAMP = false;
+        window.HAS_BASE_PLATEAU_RAMP = false;
+        window.PLAYER_BASE_TECTONIC_MODE = 'no_ramp';
+        window.OCEAN_ISLANDS.forEach((isl, idx) => {
+            if (isl.isMajor || idx < 6) {
+                const rAng = Math.atan2(-isl.z, -isl.x);
+                BASE_TERRAIN_ZONES.push({
+                    id: isl.id,
+                    faction: idx === 0 ? 'player' : (idx === 2 ? 'solaris' : `island_faction_${idx}`),
+                    mode: 'no_ramp',
+                    x: isl.x,
+                    z: isl.z,
+                    radius: Math.min(isl.rx, isl.rz) * 0.62,
+                    rimOuter: Math.min(isl.rx, isl.rz) * 0.78,
+                    heightDelta: 0.55,
+                    rampDirX: Math.cos(rAng),
+                    rampDirZ: Math.sin(rAng),
+                    rampHalfW: 4.8,
+                    isPrimaryPlayer: idx === 0
+                });
+            }
+        });
+    } else {
+        const baseModes = ['flat_ramp', 'under_ramp', 'flat_ramp'];
+        const pRoll = seededRandom();
+        PLAYER_BASE_TECTONIC_MODE = (MAP_ARCHETYPE === 'fortified_plateau')
+            ? 'flat_ramp'
+            : (pRoll < 0.72 ? 'flat_ramp' : (pRoll < 0.94 ? 'under_ramp' : 'no_ramp'));
+        HAS_BASE_PLATEAU_RAMP = (PLAYER_BASE_TECTONIC_MODE === 'flat_ramp' || PLAYER_BASE_TECTONIC_MODE === 'under_ramp');
+        window.HAS_BASE_PLATEAU_RAMP = HAS_BASE_PLATEAU_RAMP;
+        window.PLAYER_BASE_TECTONIC_MODE = PLAYER_BASE_TECTONIC_MODE;
 
-    BASE_TERRAIN_ZONES.push({
-        id: 'player_main',
-        faction: 'player',
-        mode: PLAYER_BASE_TECTONIC_MODE,
-        x: PLAYER_START_POS.x,
-        z: PLAYER_START_POS.z,
-        radius: Math.max(BASE_PLATEAU_RADIUS, 20.5),
-        rimOuter: Math.max(BASE_PLATEAU_RIM_OUTER, 25.0),
-        heightDelta: PLAYER_BASE_TECTONIC_MODE === 'flat_ramp' ? 2.35 : (PLAYER_BASE_TECTONIC_MODE === 'under_ramp' ? -1.45 : 0.45),
-        rampDirX: PLAYER_BASE_RAMP_DIR.x,
-        rampDirZ: PLAYER_BASE_RAMP_DIR.z,
-        rampHalfW: Math.max(PLAYER_BASE_RAMP_HALF_W, 5.2),
-        isPrimaryPlayer: true,
-        isCornerPlatform: true
-    });
-
-    const solRampAng = Math.atan2(-SOLARIS_BASE_POS.z, -SOLARIS_BASE_POS.x);
-    const solMode = baseModes[Math.floor(seededRandom() * baseModes.length)];
-    BASE_TERRAIN_ZONES.push({
-        id: 'solaris_ai',
-        faction: 'solaris',
-        mode: solMode,
-        x: SOLARIS_BASE_POS.x,
-        z: SOLARIS_BASE_POS.z,
-        radius: 17.5,
-        rimOuter: 21.8,
-        heightDelta: solMode === 'flat_ramp' ? 2.05 : (solMode === 'under_ramp' ? -1.30 : 0.55),
-        rampDirX: Math.cos(solRampAng),
-        rampDirZ: Math.sin(solRampAng),
-        rampHalfW: 4.8
-    });
-
-    // Dynamically Generate Big Corner Ramp Platform Terrains in the 4 Map Corners (Player/AI teams can spawn on/near them or use them as corner stronghold platforms!)
-    const cornerAnchors = [
-        [-78, -78],
-        [ 78, -78],
-        [-78,  78],
-        [ 78,  78]
-    ];
-    cornerAnchors.forEach(([rawCx, rawCz], cIdx) => {
-        let cx = rawCx + Math.round((seededRandom() - 0.5) * 8.0);
-        let cz = rawCz + Math.round((seededRandom() - 0.5) * 8.0);
-        if (HAS_VALLEY_RIVER && getRiverDist(cx, cz) < RIVER_HALF_WIDTH + 24.0) {
-            const rcC = getRiverCoords(cx, cz);
-            const pSign = rcC.signedDist >= 0 ? 1 : -1;
-            const pushed = riverCoordsToWorld(rcC.s, rcC.centerU + pSign * (RIVER_HALF_WIDTH + 25.0));
-            cx = THREE.MathUtils.clamp(Math.round(pushed.x), -86, 86);
-            cz = THREE.MathUtils.clamp(Math.round(pushed.z), -86, 86);
-        }
-        // Skip if already covered by Player Main or Solaris Main or right on top of Zerg Hive center
-        if (Math.hypot(cx - PLAYER_START_POS.x, cz - PLAYER_START_POS.z) < 38) return;
-        if (Math.hypot(cx - SOLARIS_BASE_POS.x, cz - SOLARIS_BASE_POS.z) < 34) return;
-        if (Math.hypot(cx - ENEMY_BASE_POS.x, cz - ENEMY_BASE_POS.z) < 36) return;
-
-        const cRampAng = Math.atan2(-cz, -cx);
-        const cRadius = 21.0 + seededRandom() * 3.0;
         BASE_TERRAIN_ZONES.push({
-            id: `corner_ramp_platform_${cIdx + 1}`,
-            faction: `corner_platform_${cIdx + 1}`,
-            mode: 'flat_ramp',
-            x: cx,
-            z: cz,
-            radius: cRadius,
-            rimOuter: cRadius + 4.8,
-            heightDelta: 2.35 + seededRandom() * 0.35,
-            rampDirX: Math.cos(cRampAng),
-            rampDirZ: Math.sin(cRampAng),
-            rampHalfW: 5.2,
+            id: 'player_main',
+            faction: 'player',
+            mode: PLAYER_BASE_TECTONIC_MODE,
+            x: PLAYER_START_POS.x,
+            z: PLAYER_START_POS.z,
+            radius: Math.max(BASE_PLATEAU_RADIUS, 20.5),
+            rimOuter: Math.max(BASE_PLATEAU_RIM_OUTER, 25.0),
+            heightDelta: PLAYER_BASE_TECTONIC_MODE === 'flat_ramp' ? 2.35 : (PLAYER_BASE_TECTONIC_MODE === 'under_ramp' ? -1.45 : 0.45),
+            rampDirX: PLAYER_BASE_RAMP_DIR.x,
+            rampDirZ: PLAYER_BASE_RAMP_DIR.z,
+            rampHalfW: Math.max(PLAYER_BASE_RAMP_HALF_W, 5.2),
+            isPrimaryPlayer: true,
             isCornerPlatform: true
         });
-    });
 
-    // Generate Additional Scattered Platform Bases across the sector (supports custom Lobby players/bots count!)
-    const lobbyExtraCount = (window.CUSTOM_LOBBY_PLAYERS && Array.isArray(window.CUSTOM_LOBBY_PLAYERS))
-        ? Math.max(4, window.CUSTOM_LOBBY_PLAYERS.length)
-        : 4;
-    const expansionAngles = [-1.35, 2.15, -2.35, 0.85, -0.65, 2.75];
-    for (let fIdx = 0; fIdx < Math.min(6, lobbyExtraCount); fIdx++) {
-        const expAng = playerSectorAng + expansionAngles[fIdx % expansionAngles.length] + (seededRandom() - 0.5) * 0.18;
-        const expDist = 54.0 + (fIdx % 2) * 14.0 + seededRandom() * 10.0;
-        let ex = THREE.MathUtils.clamp(Math.round(Math.cos(expAng) * expDist), -84, 84);
-        let ez = THREE.MathUtils.clamp(Math.round(Math.sin(expAng) * expDist), -84, 84);
-        if (HAS_VALLEY_RIVER && getRiverDist(ex, ez) < RIVER_HALF_WIDTH + 18.0) {
-            const rcE = getRiverCoords(ex, ez);
-            const pSign = rcE.signedDist >= 0 ? 1 : -1;
-            const pushed = riverCoordsToWorld(rcE.s, rcE.centerU + pSign * (RIVER_HALF_WIDTH + 20.0));
-            ex = THREE.MathUtils.clamp(Math.round(pushed.x), -84, 84);
-            ez = THREE.MathUtils.clamp(Math.round(pushed.z), -84, 84);
-        }
-        const clearOfExistingZones = BASE_TERRAIN_ZONES.every(bz => Math.hypot(ex - bz.x, ez - bz.z) > (bz.rimOuter || 20) + 18.0);
-        if (clearOfExistingZones && Math.hypot(ex - ENEMY_BASE_POS.x, ez - ENEMY_BASE_POS.z) > 34) {
-            const eMode = (fIdx % 4 === 3) ? 'under_ramp' : 'flat_ramp';
-            const eRampAng = Math.atan2(-ez, -ex);
+        const solRampAng = Math.atan2(-SOLARIS_BASE_POS.z, -SOLARIS_BASE_POS.x);
+        const solMode = baseModes[Math.floor(seededRandom() * baseModes.length)];
+        BASE_TERRAIN_ZONES.push({
+            id: 'solaris_ai',
+            faction: 'solaris',
+            mode: solMode,
+            x: SOLARIS_BASE_POS.x,
+            z: SOLARIS_BASE_POS.z,
+            radius: 17.5,
+            rimOuter: 21.8,
+            heightDelta: solMode === 'flat_ramp' ? 2.05 : (solMode === 'under_ramp' ? -1.30 : 0.55),
+            rampDirX: Math.cos(solRampAng),
+            rampDirZ: Math.sin(solRampAng),
+            rampHalfW: 4.8
+        });
+
+        // Dynamically Generate Big Corner Ramp Platform Terrains in the 4 Map Corners
+        const cornerAnchors = [
+            [-78, -78],
+            [ 78, -78],
+            [-78,  78],
+            [ 78,  78]
+        ];
+        cornerAnchors.forEach(([rawCx, rawCz], cIdx) => {
+            let cx = rawCx + Math.round((seededRandom() - 0.5) * 8.0);
+            let cz = rawCz + Math.round((seededRandom() - 0.5) * 8.0);
+            if (HAS_VALLEY_RIVER && getRiverDist(cx, cz) < RIVER_HALF_WIDTH + 24.0) {
+                const rcC = getRiverCoords(cx, cz);
+                const pSign = rcC.signedDist >= 0 ? 1 : -1;
+                const pushed = riverCoordsToWorld(rcC.s, rcC.centerU + pSign * (RIVER_HALF_WIDTH + 25.0));
+                cx = THREE.MathUtils.clamp(Math.round(pushed.x), -86, 86);
+                cz = THREE.MathUtils.clamp(Math.round(pushed.z), -86, 86);
+            }
+            if (Math.hypot(cx - PLAYER_START_POS.x, cz - PLAYER_START_POS.z) < 38) return;
+            if (Math.hypot(cx - SOLARIS_BASE_POS.x, cz - SOLARIS_BASE_POS.z) < 34) return;
+            if (Math.hypot(cx - ENEMY_BASE_POS.x, cz - ENEMY_BASE_POS.z) < 36) return;
+
+            const cRampAng = Math.atan2(-cz, -cx);
+            const cRadius = 21.0 + seededRandom() * 3.0;
             BASE_TERRAIN_ZONES.push({
-                id: `faction_expansion_${fIdx + 1}`,
-                faction: `ai_faction_${fIdx + 1}`,
-                mode: eMode,
-                x: ex,
-                z: ez,
-                radius: 15.8,
-                rimOuter: 19.8,
-                heightDelta: eMode === 'flat_ramp' ? 1.95 : -1.25,
-                rampDirX: Math.cos(eRampAng),
-                rampDirZ: Math.sin(eRampAng),
-                rampHalfW: 4.5,
-                isScatteredPlatform: true
+                id: `corner_ramp_platform_${cIdx + 1}`,
+                faction: `corner_platform_${cIdx + 1}`,
+                mode: 'flat_ramp',
+                x: cx,
+                z: cz,
+                radius: cRadius,
+                rimOuter: cRadius + 4.8,
+                heightDelta: 2.35 + seededRandom() * 0.35,
+                rampDirX: Math.cos(cRampAng),
+                rampDirZ: Math.sin(cRampAng),
+                rampHalfW: 5.2,
+                isCornerPlatform: true
             });
+        });
+
+        // Generate Additional Scattered Platform Bases across the sector
+        const lobbyExtraCount = (window.CUSTOM_LOBBY_PLAYERS && Array.isArray(window.CUSTOM_LOBBY_PLAYERS))
+            ? Math.max(4, window.CUSTOM_LOBBY_PLAYERS.length)
+            : 4;
+        const expansionAngles = [-1.35, 2.15, -2.35, 0.85, -0.65, 2.75];
+        for (let fIdx = 0; fIdx < Math.min(6, lobbyExtraCount); fIdx++) {
+            const expAng = playerSectorAng + expansionAngles[fIdx % expansionAngles.length] + (seededRandom() - 0.5) * 0.18;
+            const expDist = 54.0 + (fIdx % 2) * 14.0 + seededRandom() * 10.0;
+            let ex = THREE.MathUtils.clamp(Math.round(Math.cos(expAng) * expDist), -84, 84);
+            let ez = THREE.MathUtils.clamp(Math.round(Math.sin(expAng) * expDist), -84, 84);
+            if (HAS_VALLEY_RIVER && getRiverDist(ex, ez) < RIVER_HALF_WIDTH + 18.0) {
+                const rcE = getRiverCoords(ex, ez);
+                const pSign = rcE.signedDist >= 0 ? 1 : -1;
+                const pushed = riverCoordsToWorld(rcE.s, rcE.centerU + pSign * (RIVER_HALF_WIDTH + 20.0));
+                ex = THREE.MathUtils.clamp(Math.round(pushed.x), -84, 84);
+                ez = THREE.MathUtils.clamp(Math.round(pushed.z), -84, 84);
+            }
+            const clearOfExistingZones = BASE_TERRAIN_ZONES.every(bz => Math.hypot(ex - bz.x, ez - bz.z) > (bz.rimOuter || 20) + 18.0);
+            if (clearOfExistingZones && Math.hypot(ex - ENEMY_BASE_POS.x, ez - ENEMY_BASE_POS.z) > 34) {
+                const eMode = (fIdx % 4 === 3) ? 'under_ramp' : 'flat_ramp';
+                const eRampAng = Math.atan2(-ez, -ex);
+                BASE_TERRAIN_ZONES.push({
+                    id: `faction_expansion_${fIdx + 1}`,
+                    faction: `ai_faction_${fIdx + 1}`,
+                    mode: eMode,
+                    x: ex,
+                    z: ez,
+                    radius: 15.8,
+                    rimOuter: 19.8,
+                    heightDelta: eMode === 'flat_ramp' ? 1.95 : -1.25,
+                    rampDirX: Math.cos(eRampAng),
+                    rampDirZ: Math.sin(eRampAng),
+                    rampHalfW: 4.5,
+                    isScatteredPlatform: true
+                });
+            }
         }
     }
 
@@ -1004,6 +1054,11 @@ function generateProceduralTopographyParameters(customSeed) {
         if (isPointInBridgeApproachCorridor(px, pz, pad + 6.5, 16.0)) return false;
         return true;
     };
+
+    if (ACTIVE_PLANET_BIOME === 'ocean') {
+        // Ocean Archipelago uses OCEAN_ISLANDS exclusively; skip continental mesas, canyons, ravines & ponds
+        return;
+    }
 
     for (let i = 0; i < 6; i++) {
         const mx = (seededRandom() - 0.5) * 185;
@@ -1232,8 +1287,10 @@ function computeRawTerrainHeight(x, z) {
         const hummock = Math.cos(x * 0.21 + z * 0.19 + MAP_SEED * 0.07) * 0.16;
         h = h * 0.90 + karstSwale + hummock;
     } else if (biome === 'ocean' && window.OCEAN_ISLANDS && window.OCEAN_ISLANDS.length > 0) {
-        // Multi-Island Archipelago Topography: Deep ocean floor (-1.35m) rising via coral shoals & sandy beaches onto irregular islands
-        let bestIslandH = -1.35 + Math.sin(x * 0.06 + MAP_SEED) * Math.cos(z * 0.06) * 0.18;
+        // Multi-Island Archipelago Topography:
+        // Deep ocean floor (-1.42m) -> shallow coral reef shoals (-0.32m) -> raised sandy/rocky beaches (+0.18m..+0.42m)
+        // -> flat strategic buildable island plateau (+0.65m..+0.92m) -> coastal rocky headlands & bluffs (+1.35m..+2.15m)
+        let bestIslandH = -1.42 + Math.sin(x * 0.055 + MAP_SEED) * Math.cos(z * 0.055) * 0.16;
         for (let idx = 0; idx < window.OCEAN_ISLANDS.length; idx++) {
             const isl = window.OCEAN_ISLANDS[idx];
             const dx = x - isl.x;
@@ -1241,33 +1298,80 @@ function computeRawTerrainHeight(x, z) {
             const lx = dx * isl.cosR + dz * isl.sinR;
             const lz = -dx * isl.sinR + dz * isl.cosR;
             const ang = Math.atan2(lz, lx);
-            // Organic multi-lobe island coastline with natural coves, headlands & sandbars
+            // Irregular organic multi-harmonic island coastline with natural coves, headlands, peninsulas & sandbars
             const coastMod = 1.0
-                + 0.16 * Math.sin(ang * 3.0 + isl.lobePhase1)
-                + 0.11 * Math.cos(ang * 5.0 + isl.lobePhase2)
-                - 0.14 * Math.exp(-Math.pow(Math.atan2(Math.sin(ang - isl.coveAngle), Math.cos(ang - isl.coveAngle)) * 2.2, 2));
-            const normR = Math.hypot(lx / (isl.rx * coastMod), lz / (isl.rz * coastMod));
+                + 0.15 * Math.sin(ang * 3.0 + isl.lobePhase1)
+                + 0.10 * Math.cos(ang * 5.0 + isl.lobePhase2)
+                + 0.06 * Math.sin(ang * 7.0 + (isl.lobePhase3 || 1.2))
+                - 0.12 * Math.exp(-Math.pow(Math.atan2(Math.sin(ang - isl.coveAngle), Math.cos(ang - isl.coveAngle)) * 2.4, 2));
+            const effRx = isl.rx * coastMod;
+            const effRz = isl.rz * coastMod;
+            const normR = Math.hypot(lx / effRx, lz / effRz);
             if (normR < 1.55) {
                 let islElev;
-                if (normR <= 0.72) {
-                    const inlandT = normR / 0.72;
-                    const inlandBell = 0.5 + 0.5 * Math.cos(inlandT * Math.PI);
-                    islElev = 0.28 + inlandBell * isl.peakH + h * 0.25;
-                } else if (normR <= 1.05) {
-                    // Gradual sandy beach transition from inland (0.28m) to waterline (-0.12m)
-                    const beachT = (normR - 0.72) / 0.33;
+                if (normR <= 0.64) {
+                    // Strategic flat buildable island plateau for bases/structures + subtle coastal bluff crown near headlands
+                    const inlandT = normR / 0.64;
+                    const bluffRing = Math.pow(Math.sin(inlandT * Math.PI), 1.6) * 0.24 * (0.5 + 0.5 * Math.sin(ang * 2.0 + isl.lobePhase1));
+                    const baseElevation = isl.isMajor ? 0.68 : 0.62;
+                    islElev = baseElevation + bluffRing * isl.peakH + h * 0.12;
+                } else if (normR <= 0.96) {
+                    // Raised rocky shore & sandy beach berm descending smoothly from interior plateau (+0.68m) to waterline (0.0m)
+                    const beachT = (normR - 0.64) / 0.32;
                     const sBeach = beachT * beachT * (3.0 - 2.0 * beachT);
-                    islElev = THREE.MathUtils.lerp(0.28 + h * 0.10, -0.14, sBeach);
-                } else {
-                    // Shallow turquoise sandbar / reef dropoff into deep ocean channel
-                    const shoalT = (normR - 1.05) / 0.50;
+                    const rimBase = (isl.isMajor ? 0.68 : 0.62) + h * 0.08;
+                    const beachShelf = 0.22 * Math.sin(beachT * Math.PI);
+                    islElev = THREE.MathUtils.lerp(rimBase, -0.06, sBeach) + beachShelf * 0.35;
+                } else if (normR <= 1.26) {
+                    // Shallow coastal turquoise shelf & sandbar (-0.06m to -0.46m)
+                    const shoalT = (normR - 0.96) / 0.30;
                     const sShoal = shoalT * shoalT * (3.0 - 2.0 * shoalT);
-                    islElev = THREE.MathUtils.lerp(-0.14, -1.35, sShoal);
+                    islElev = THREE.MathUtils.lerp(-0.06, -0.46, sShoal);
+                } else {
+                    // Dropoff into deep ocean channel (-0.46m to -1.42m)
+                    const deepT = (normR - 1.26) / 0.29;
+                    const sDeep = deepT * deepT * (3.0 - 2.0 * deepT);
+                    islElev = THREE.MathUtils.lerp(-0.46, -1.42, sDeep);
                 }
                 if (islElev > bestIslandH) bestIslandH = islElev;
             }
         }
         h = bestIslandH;
+
+        // Grade inter-island bridge approach causeway headlands on the island shores so bridge ramps connect with zero gaps
+        for (let bIdx = 0; bIdx < RIVER_BRIDGES.length; bIdx++) {
+            const rb = RIVER_BRIDGES[bIdx];
+            const bc = getBridgeLocalCoords(rb, x, z);
+            const dU = Math.abs(bc.localU);
+            const dS = Math.abs(bc.localS);
+            const flatSpan = rb.flatHalfSpan || 14.0;
+            const rampReach = rb.rampReachU || (flatSpan + 5.2);
+            if (dU >= flatSpan - 1.2 && dU <= rampReach + 4.5 && dS <= rb.halfWidth + 3.6) {
+                const uCenter = (flatSpan + rampReach) * 0.5;
+                const uHalf = (rampReach - flatSpan) * 0.5 + 2.8;
+                const uBlend = THREE.MathUtils.clamp(1.0 - Math.abs(dU - uCenter) / uHalf, 0.0, 1.0);
+                const sBlend = dS <= rb.halfWidth ? 1.0 : THREE.MathUtils.clamp(1.0 - (dS - rb.halfWidth) / 3.6, 0.0, 1.0);
+                const w = uBlend * uBlend * (3.0 - 2.0 * uBlend) * sBlend;
+                if (w > 0.01) {
+                    h = Math.max(h, THREE.MathUtils.lerp(h, 0.36, w));
+                }
+            }
+        }
+
+        // Apply flattened building pads on islands and return directly so continental trenches/valleys never cut islands!
+        for (let i = 0; i < FLATTENED_BUILDING_PADS.length; i++) {
+            const pad = FLATTENED_BUILDING_PADS[i];
+            const d = Math.hypot(x - pad.x, z - pad.z);
+            const totalR = pad.flatR + pad.blendR;
+            if (d <= pad.flatR) {
+                h = pad.targetY;
+            } else if (d < totalR) {
+                const t = (d - pad.flatR) / pad.blendR;
+                const smoothT = t * t * (3.0 - 2.0 * t);
+                h = THREE.MathUtils.lerp(pad.targetY, h, smoothT);
+            }
+        }
+        return h;
     }
 
     if (HAS_RAVINE_BRIDGES) {
@@ -4812,11 +4916,45 @@ function rebuildTerrainVerticesAndColors() {
             .lerp(cSunlitMeadow, detailPatch * 0.42)
             .lerp(cForestFloor, (1.0 - cloverNoise) * 0.22);
 
-        if (biome === 'lava') {
-            // Glowing volcanic fissure veins & cooled basalt ash mottling
-            const lavaCrack = Math.pow(Math.max(0, Math.sin(vx * 0.18 - vz * 0.14 + MAP_SEED * 0.31)), 7);
-            if (lavaCrack > 0.25 && roadF < 0.15 && vy < 2.2) {
-                col.lerp(new THREE.Color(0xd9380a), Math.min(0.85, (lavaCrack - 0.25) * 1.35));
+        if (biome === 'ocean') {
+            // Unified Ocean Archipelago Coastline & Island Biome Palette (Zero overlapping border outlines!)
+            const sandGrain = Math.sin(vx * 0.85 + vz * 0.78 + MAP_SEED * 0.19) * 0.5 + 0.5;
+            const cDeepAbyss = new THREE.Color(0x062034);
+            const cCoralShoal = new THREE.Color(0x166b7d);
+            const cWetSand = new THREE.Color(0xb8a378).lerp(new THREE.Color(0x9c8964), sandGrain * 0.45);
+            const cDryBeach = new THREE.Color(0xdcce9e).lerp(new THREE.Color(0xc9b686), sandGrain * 0.40);
+            const cIslandGrass = new THREE.Color(0x367848).lerp(new THREE.Color(0x4a8f58), macroPatch * 0.65);
+            const cCoastalRock = new THREE.Color(0x647582).lerp(new THREE.Color(0x7c8d99), detailPatch * 0.55);
+
+            if (vy < -0.52) {
+                const tDeep = THREE.MathUtils.clamp((-0.52 - vy) / 0.90, 0.0, 1.0);
+                col.copy(cCoralShoal).lerp(cDeepAbyss, tDeep);
+            } else if (vy < -0.12) {
+                const tShoal = (vy - (-0.52)) / 0.40;
+                col.copy(cCoralShoal).lerp(cWetSand, tShoal * tShoal * (3.0 - 2.0 * tShoal));
+            } else if (vy < 0.24) {
+                const tBeach = (vy - (-0.12)) / 0.36;
+                col.copy(cWetSand).lerp(cDryBeach, tBeach);
+            } else if (vy < 0.56) {
+                const tInland = (vy - 0.24) / 0.32;
+                col.copy(cDryBeach).lerp(cIslandGrass, tInland * tInland * (3.0 - 2.0 * tInland));
+            } else {
+                col.copy(cIslandGrass);
+                if (vy > 0.92 || slope > 0.11) {
+                    const rockBlend = THREE.MathUtils.clamp(Math.max((vy - 0.92) * 0.75, (slope - 0.11) * 3.5), 0.0, 0.92);
+                    col.lerp(cCoastalRock, rockBlend);
+                }
+            }
+        } else if (biome === 'lava') {
+            // Dark volcanic basalt rock, scorched obsidian plates & incandescent glowing magma cracks
+            const basaltVar = Math.sin(vx * 0.14 + vz * 0.12 + MAP_SEED * 0.23) * 0.5 + 0.5;
+            col.setHex(0x1b1514).lerp(new THREE.Color(0x2d201d), basaltVar * 0.65);
+            const crack1 = Math.sin(vx * 0.22 - vz * 0.18 + Math.sin(vx * 0.09 + vz * 0.08) * 2.2 + MAP_SEED * 0.31);
+            const crack2 = Math.cos(vx * 0.17 + vz * 0.24 - Math.cos(vz * 0.11) * 1.8 - MAP_SEED * 0.19);
+            const crackHeat = Math.pow(Math.max(0.0, 1.0 - Math.abs(crack1) * 4.2), 2.2) + Math.pow(Math.max(0.0, 1.0 - Math.abs(crack2) * 4.8), 2.4);
+            if (crackHeat > 0.08 && roadF < 0.20 && vy < 2.6) {
+                const magmaCol = crackHeat > 0.55 ? new THREE.Color(0xff7711) : new THREE.Color(0xd9380a);
+                col.lerp(magmaCol, Math.min(0.92, crackHeat * 0.85));
             }
         } else if (biome === 'desert') {
             // Wind-rippled golden dune crests & red-ochre badland hollows
@@ -4824,7 +4962,7 @@ function rebuildTerrainVerticesAndColors() {
             col.lerp(new THREE.Color(0xeac384), duneCrest * 0.32);
         }
 
-        if (roadF > 0.08) {
+        if (roadF > 0.08 && biome !== 'ocean') {
             col.lerp(cRoadBorder, Math.min(0.92, roadF * 1.25));
         }
 
@@ -4856,44 +4994,46 @@ function rebuildTerrainVerticesAndColors() {
         const bFactor = getBridgeFactor(vx, vz);
         const rDist = Math.abs(getRavineSignedDist(vx, vz));
 
-        if (HAS_RAVINE_BRIDGES && bFactor > 0.62 && rDist < 11.8) {
-            const s = (vx - vz) * 0.70710678;
-            let laneDist = Infinity;
-            for (let bIdx = 0; bIdx < BRIDGES.length; bIdx++) {
-                laneDist = Math.min(laneDist, Math.abs(s - BRIDGES[bIdx].sCoord));
+        if (biome !== 'ocean') {
+            if (HAS_RAVINE_BRIDGES && bFactor > 0.62 && rDist < 11.8) {
+                const s = (vx - vz) * 0.70710678;
+                let laneDist = Infinity;
+                for (let bIdx = 0; bIdx < BRIDGES.length; bIdx++) {
+                    laneDist = Math.min(laneDist, Math.abs(s - BRIDGES[bIdx].sCoord));
+                }
+                col.copy(laneDist < 1.8 ? cBridgeCenter : cBridgeDeck);
+            } else if (vy < -8.0) {
+                col.copy(cRavineAbyss);
+            } else if (vy < -0.25) {
+                const submergeBlend = THREE.MathUtils.smoothstep(-0.25 - vy, 0.0, 1.35);
+                const deepWallCol = cRavineWall.clone().lerp(cCliffSlate, Math.min(1, (vy + 6.0) / 5.5));
+                col.lerp(deepWallCol, submergeBlend);
+            } else if (vy > 5.8) {
+                col.copy(cSnowPeak);
+            } else if (vy > 1.8) {
+                if (slope < 0.08) {
+                    col.lerp(cHighlandMoss, 0.55).lerp(cCrystalSoil, detailPatch * 0.28);
+                } else {
+                    col.lerp(cMountainRock, Math.min(1, (vy - 1.8) / 2.4));
+                }
+            } else if (vy > 0.65) {
+                col.lerp(cHighlandMoss, Math.min(0.48, (vy - 0.55) * 0.55));
+                if (vy > 1.35) col.lerp(cCliffSlate, Math.min(0.45, (vy - 1.35) * 0.55));
             }
-            col.copy(laneDist < 1.8 ? cBridgeCenter : cBridgeDeck);
-        } else if (vy < -8.0) {
-            col.copy(cRavineAbyss);
-        } else if (vy < -0.25) {
-            const submergeBlend = THREE.MathUtils.smoothstep(-0.25 - vy, 0.0, 1.35);
-            const deepWallCol = cRavineWall.clone().lerp(cCliffSlate, Math.min(1, (vy + 6.0) / 5.5));
-            col.lerp(deepWallCol, submergeBlend);
-        } else if (vy > 5.8) {
-            col.copy(cSnowPeak);
-        } else if (vy > 1.8) {
-            if (slope < 0.08) {
-                col.lerp(cHighlandMoss, 0.55).lerp(cCrystalSoil, detailPatch * 0.28);
-            } else {
-                col.lerp(cMountainRock, Math.min(1, (vy - 1.8) / 2.4));
-            }
-        } else if (vy > 0.65) {
-            col.lerp(cHighlandMoss, Math.min(0.48, (vy - 0.55) * 0.55));
-            if (vy > 1.35) col.lerp(cCliffSlate, Math.min(0.45, (vy - 1.35) * 0.55));
         }
 
-        // Soft riparian shoreline & riverbank transition in terrain vertex colors
-        if (HAS_VALLEY_RIVER) {
+        // Soft riparian shoreline & riverbank transition in terrain vertex colors (non-ocean biomes)
+        if (HAS_VALLEY_RIVER && biome !== 'ocean') {
             const rc = getRiverCoords(vx, vz);
             const localHalfW = rc.halfWidth || RIVER_HALF_WIDTH;
             const maxShoreReach = localHalfW + 5.6;
             if (rc.dist <= maxShoreReach) {
                 const shingleGrain = (Math.sin(vx * 0.92 + vz * 0.84 + MAP_SEED * 0.17) * 0.5 + 0.5);
-                const cDeepSilt = new THREE.Color(biome === 'lava' ? 0x6e1806 : (biome === 'desert' ? 0x264852 : 0x122832));
-                const cShallowShoal = new THREE.Color(biome === 'lava' ? 0xc8380c : (biome === 'desert' ? 0x456e68 : 0x27464b));
-                const cWetMud = new THREE.Color(biome === 'lava' ? 0x2b1814 : (biome === 'desert' ? 0x8c673e : 0x3d382f))
-                    .lerp(new THREE.Color(biome === 'lava' ? 0x422018 : (biome === 'desert' ? 0xa37a4c : 0x484339)), shingleGrain * 0.55);
-                const cRiparianLoam = new THREE.Color(biome === 'lava' ? 0x241614 : (biome === 'desert' ? 0xb5864e : 0x524c3e))
+                const cDeepSilt = new THREE.Color(biome === 'lava' ? 0x8f2006 : (biome === 'desert' ? 0x264852 : 0x122832));
+                const cShallowShoal = new THREE.Color(biome === 'lava' ? 0xd9440c : (biome === 'desert' ? 0x456e68 : 0x27464b));
+                const cWetMud = new THREE.Color(biome === 'lava' ? 0x261310 : (biome === 'desert' ? 0x8c673e : 0x3d382f))
+                    .lerp(new THREE.Color(biome === 'lava' ? 0x3d1b14 : (biome === 'desert' ? 0xa37a4c : 0x484339)), shingleGrain * 0.55);
+                const cRiparianLoam = new THREE.Color(biome === 'lava' ? 0x1f1210 : (biome === 'desert' ? 0xb5864e : 0x524c3e))
                     .lerp(cLushVerge, shingleGrain * 0.35);
 
                 if (rc.dist < localHalfW * 0.72) {
@@ -5913,8 +6053,11 @@ function createOasisPonds() {
         }
         pondGeo.setAttribute('color', new THREE.BufferAttribute(pColors, 3));
         pondGeo.computeVertexNormals();
-        const pondMesh = new THREE.Mesh(pondGeo, isLava ? lavaFlowMat : MAT.waterShader);
+        pondGeo.computeBoundingBox();
+        pondGeo.computeBoundingSphere();
+        const pondMesh = new THREE.Mesh(pondGeo, MAT.waterShader);
         pondMesh.position.set(pd.x, -0.42, pd.z);
+        pondMesh.frustumCulled = false;
         addMapMesh(pondMesh);
         obstacles.push({ x: pd.x, z: pd.z, r: pd.r * 1.25, isDynamicPond: true, pondRef: pd, type: 'pond' });
     });
@@ -5952,20 +6095,22 @@ function createValleyRiver() {
 
     const isLava = ACTIVE_PLANET_BIOME === 'lava';
     const isDesert = ACTIVE_PLANET_BIOME === 'desert';
+    const isOcean = ACTIVE_PLANET_BIOME === 'ocean';
 
-    // 1. Soft Shoreline Transition Vertex Color Painting on the Canyon Floor (terrainGeo)
-    // Eliminates sharp seams between the carved river channel, wet shoreline, and surrounding canyon floor
+    // 1. Unified Shoreline & Channel Transition on the Terrain Mesh (terrainGeo)
+    // No duplicate overlapping bankMesh ribbons are spawned so coastlines, rivers, lava channels & bridges have zero overlapping outlines!
     const colorAttr = terrainGeo.attributes.color;
-    const cDeepSilt = new THREE.Color(isLava ? 0x6e1806 : (isDesert ? 0x264852 : 0x122832));
-    const cShallowShoal = new THREE.Color(isLava ? 0xc8380c : (isDesert ? 0x456e68 : 0x27464b));
-    const cWetMudBase = new THREE.Color(isLava ? 0x2b1814 : (isDesert ? 0x8c673e : 0x3d382f));
-    const cWetShingle = new THREE.Color(isLava ? 0x422018 : (isDesert ? 0xa37a4c : 0x484339));
-    const cRiparianLoamBase = new THREE.Color(isLava ? 0x241614 : (isDesert ? 0xb5864e : 0x524c3e));
+    const cDeepSilt = new THREE.Color(isLava ? 0x8f2006 : (isDesert ? 0x264852 : 0x122832));
+    const cShallowShoal = new THREE.Color(isLava ? 0xd9440c : (isDesert ? 0x456e68 : 0x27464b));
+    const cWetMudBase = new THREE.Color(isLava ? 0x261310 : (isDesert ? 0x8c673e : 0x3d382f));
+    const cWetShingle = new THREE.Color(isLava ? 0x3d1b14 : (isDesert ? 0xa37a4c : 0x484339));
+    const cRiparianLoamBase = new THREE.Color(isLava ? 0x1f1210 : (isDesert ? 0xb5864e : 0x524c3e));
     const tmpMud = new THREE.Color();
     const tmpLoam = new THREE.Color();
     const tmpCol = new THREE.Color();
+    const cCanyonSample = new THREE.Color();
 
-    if (colorAttr) {
+    if (colorAttr && !isOcean) {
         for (let i = 0; i < posAttr.count; i++) {
             const vx = posAttr.getX(i);
             const vz = posAttr.getZ(i);
@@ -6011,123 +6156,16 @@ function createValleyRiver() {
         colorAttr.needsUpdate = true;
     }
 
-    // 2. Terrain-Blended Riverbank & Shallow-Shoal Skirt Geometry (Both Riverbanks)
-    const bankSegsAlong = 136;
-    const bankSegsAcross = 8;
-    const bankHalfLength = 69.0;
-    const cCanyonSample = new THREE.Color();
-    const cBankVertex = new THREE.Color();
-
-    [-1, 1].forEach(bankSign => {
-        const bVertCount = (bankSegsAlong + 1) * (bankSegsAcross + 1);
-        const bPositions = new Float32Array(bVertCount * 3);
-        const bColors = new Float32Array(bVertCount * 3);
-        const bUvs = new Float32Array(bVertCount * 2);
-        const bIndices = [];
-
-        let ptr = 0;
-        let uvPtr = 0;
-        for (let ia = 0; ia <= bankSegsAlong; ia++) {
-            const tAlong = ia / bankSegsAlong;
-            const sCoord = (tAlong - 0.5) * (bankHalfLength * 2.0);
-            const centerU = getRiverCenterUAtS(sCoord);
-            const localHalfW = getRiverHalfWidthAtS(sCoord);
-
-            const innerOffset = localHalfW * 0.52;
-            const outerOffset = localHalfW + 3.65;
-
-            for (let ic = 0; ic <= bankSegsAcross; ic++) {
-                const tAcross = ic / bankSegsAcross;
-                const radialDist = THREE.MathUtils.lerp(innerOffset, outerOffset, tAcross);
-                const uCoord = centerU + bankSign * radialDist;
-                const wPt = riverCoordsToWorld(sCoord, uCoord);
-                const groundH = getTerrainHeight(wPt.x, wPt.z);
-
-                const shoreFeather = THREE.MathUtils.smoothstep(tAcross, 0.0, 0.42);
-                const outerWeld = THREE.MathUtils.smoothstep(tAcross, 0.65, 1.0);
-                const shoalBedY = Math.min(groundH, RIVER_WATER_Y - 0.36 * (1.0 - shoreFeather));
-                let bankY = THREE.MathUtils.lerp(shoalBedY, groundH, shoreFeather);
-                const bankCrown = Math.sin(tAcross * Math.PI) * (1.0 - outerWeld) * 0.024;
-                bankY = bankY + bankCrown + 0.002 * (1.0 - outerWeld);
-
-                if (getRiverBridgeFactor(wPt.x, wPt.z) > 0.05) {
-                    bankY = Math.min(bankY, groundH - 0.015);
-                }
-
-                bPositions[ptr] = wPt.x;
-                bPositions[ptr + 1] = bankY;
-                bPositions[ptr + 2] = wPt.z;
-
-                const grain = Math.sin(wPt.x * 1.15 + wPt.z * 0.95 + MAP_SEED * 0.23) * 0.5 + 0.5;
-                sampleCanyonFloorColorAt(wPt.x, wPt.z, cCanyonSample);
-                tmpMud.copy(cWetMudBase).lerp(cWetShingle, grain * 0.6);
-                tmpLoam.copy(cRiparianLoamBase).lerp(cCanyonSample, 0.35 + grain * 0.25);
-
-                if (tAcross < 0.28) {
-                    const f = tAcross / 0.28;
-                    cBankVertex.copy(cDeepSilt).lerp(cShallowShoal, f);
-                } else if (tAcross < 0.56) {
-                    const f = (tAcross - 0.28) / 0.28;
-                    const sf = f * f * (3.0 - 2.0 * f);
-                    cBankVertex.copy(cShallowShoal).lerp(tmpMud, sf);
-                } else if (tAcross < 0.82) {
-                    const f = (tAcross - 0.56) / 0.26;
-                    const sf = f * f * (3.0 - 2.0 * f);
-                    cBankVertex.copy(tmpMud).lerp(tmpLoam, sf);
-                } else {
-                    const f = (tAcross - 0.82) / 0.18;
-                    const sf = f * f * (3.0 - 2.0 * f);
-                    cBankVertex.copy(tmpLoam).lerp(cCanyonSample, sf);
-                }
-
-                bColors[ptr] = cBankVertex.r;
-                bColors[ptr + 1] = cBankVertex.g;
-                bColors[ptr + 2] = cBankVertex.b;
-                ptr += 3;
-
-                bUvs[uvPtr] = tAcross;
-                bUvs[uvPtr + 1] = tAlong * 24.0;
-                uvPtr += 2;
-            }
-        }
-
-        const rowStride = bankSegsAcross + 1;
-        for (let ia = 0; ia < bankSegsAlong; ia++) {
-            for (let ic = 0; ic < bankSegsAcross; ic++) {
-                const a = ia * rowStride + ic;
-                const b = a + 1;
-                const c = a + rowStride;
-                const d = c + 1;
-                if (bankSign > 0) {
-                    bIndices.push(a, c, b, b, c, d);
-                } else {
-                    bIndices.push(a, b, c, b, d, c);
-                }
-            }
-        }
-
-        const bankGeo = new THREE.BufferGeometry();
-        bankGeo.setAttribute('position', new THREE.BufferAttribute(bPositions, 3));
-        bankGeo.setAttribute('color', new THREE.BufferAttribute(bColors, 3));
-        bankGeo.setAttribute('uv', new THREE.BufferAttribute(bUvs, 2));
-        bankGeo.setIndex(bIndices);
-        bankGeo.computeVertexNormals();
-        const bankMesh = new THREE.Mesh(bankGeo, riverbankTransitionMat);
-        bankMesh.receiveShadow = true;
-        addMapMesh(bankMesh);
-    });
-
-    // 3. Variable-Width Meandering River Water / Molten Magma Plane OR Full Ocean Archipelago Sea Surface
-    const isOcean = (ACTIVE_PLANET_BIOME === 'ocean');
+    // 2. Full-Map Continuous River Water / Molten Magma Channel OR Ocean Archipelago Sea Surface
     if (isOcean) {
-        const oceanGeo = new THREE.PlaneGeometry(240, 240, 140, 140);
+        const oceanGeo = new THREE.PlaneGeometry(MAP_SIZE, MAP_SIZE, 180, 180);
         oceanGeo.rotateX(-Math.PI / 2);
         const oPos = oceanGeo.attributes.position;
         const oColors = new Float32Array(oPos.count * 3);
-        const cDeepSea = new THREE.Color(0x06253a);
-        const cMidSea = new THREE.Color(0x0e4d6c);
-        const cTurquoise = new THREE.Color(0x1da2b8);
-        const cSurfFoam = new THREE.Color(0x88e2ec);
+        const cDeepSea = new THREE.Color(0x052238);
+        const cMidSea = new THREE.Color(0x0d4f70);
+        const cTurquoise = new THREE.Color(0x1ca8be);
+        const cSurfFoam = new THREE.Color(0x90e8f0);
         const cTmp = new THREE.Color();
 
         for (let i = 0; i < oPos.count; i++) {
@@ -6151,19 +6189,25 @@ function createValleyRiver() {
         }
         oceanGeo.setAttribute('color', new THREE.BufferAttribute(oColors, 3));
         oceanGeo.computeVertexNormals();
+        oceanGeo.computeBoundingBox();
+        oceanGeo.computeBoundingSphere();
         const oceanMesh = new THREE.Mesh(oceanGeo, MAT.waterShader);
+        oceanMesh.name = 'OceanArchipelagoSeaMesh';
+        oceanMesh.frustumCulled = false;
         addMapMesh(oceanMesh);
     } else {
-        const segsAlong = 136;
-        const segsAcross = 16;
-        const riverGeo = new THREE.PlaneGeometry(138, 1.0, segsAlong, segsAcross);
+        // Span the full playable & outer map extent (-128m to +128m = 256m) so the river never cuts off at distant camera ranges!
+        const segsAlong = 240;
+        const segsAcross = 20;
+        const riverSpanLength = 256.0;
+        const riverGeo = new THREE.PlaneGeometry(riverSpanLength, 1.0, segsAlong, segsAcross);
         riverGeo.rotateX(-Math.PI / 2);
         const rPos = riverGeo.attributes.position;
         const rColors = new Float32Array(rPos.count * 3);
 
-        const cWaterDeep = new THREE.Color(isLava ? 0xffc400 : 0x0c3144);
-        const cWaterMid = new THREE.Color(isLava ? 0xff4800 : 0x1d5c6d);
-        const cWaterShoal = new THREE.Color(isLava ? 0xb82000 : 0x366e72);
+        const cWaterDeep = new THREE.Color(isLava ? 0xffcf00 : 0x0c3144);
+        const cWaterMid = new THREE.Color(isLava ? 0xff4d00 : 0x1d5c6d);
+        const cWaterShoal = new THREE.Color(isLava ? 0xc42200 : 0x366e72);
         const cWaterShoreEdge = new THREE.Color(isLava ? 0x2c0d04 : 0x4c473b);
         const cVertWater = new THREE.Color();
 
@@ -6171,18 +6215,20 @@ function createValleyRiver() {
             const sCoord = rPos.getX(i);
             const normZ = rPos.getZ(i) * 2.0; // [-1, 1] across river channel
             const centerU = getRiverCenterUAtS(sCoord);
-            const localHalfW = getRiverHalfWidthAtS(sCoord) + 0.68;
+            const localHalfW = getRiverHalfWidthAtS(sCoord) + 0.72;
             const across = normZ * localHalfW;
             const uCoord = centerU + across;
             const wPt = riverCoordsToWorld(sCoord, uCoord);
             const edgeFrac = Math.abs(normZ);
 
-            // Weld outer shoreline vertices smoothly into the sloped riverbank terrain so zero floating gaps can ever appear
+            // Keep center channel water well above the carved riverbed (-0.36m..-0.98m) to prevent depth-buffer z-fighting at max camera zoom,
+            // while welding outer shoreline vertices smoothly into the sloped riverbank terrain.
             const groundH = getTerrainHeight(wPt.x, wPt.z);
-            const meniscusDrop = Math.pow(edgeFrac, 2.6) * 0.032;
-            const edgeTerrainBlend = THREE.MathUtils.smoothstep(edgeFrac, 0.74, 1.0);
-            const targetEdgeY = Math.min(RIVER_WATER_Y + 0.008, groundH + 0.012);
-            const waterY = THREE.MathUtils.lerp(RIVER_WATER_Y - meniscusDrop, targetEdgeY, edgeTerrainBlend * 0.85);
+            const meniscusDrop = Math.pow(edgeFrac, 2.8) * 0.024;
+            const edgeTerrainBlend = THREE.MathUtils.smoothstep(edgeFrac, 0.78, 1.0);
+            const centerSurfaceY = RIVER_WATER_Y + 0.022;
+            const targetEdgeY = Math.min(centerSurfaceY + 0.008, Math.max(groundH + 0.015, RIVER_WATER_Y - 0.04));
+            const waterY = THREE.MathUtils.lerp(centerSurfaceY - meniscusDrop, targetEdgeY, edgeTerrainBlend * 0.82);
             rPos.setXYZ(i, wPt.x, waterY, wPt.z);
 
             // Multi-stop vertex color gradient: deep thalweg -> mid channel -> shallow shoal -> canyon-floor-matched shoreline
@@ -6204,7 +6250,11 @@ function createValleyRiver() {
         }
         riverGeo.setAttribute('color', new THREE.BufferAttribute(rColors, 3));
         riverGeo.computeVertexNormals();
-        const riverMesh = new THREE.Mesh(riverGeo, isLava ? lavaFlowMat : MAT.waterShader);
+        riverGeo.computeBoundingBox();
+        riverGeo.computeBoundingSphere();
+        const riverMesh = new THREE.Mesh(riverGeo, MAT.waterShader);
+        riverMesh.name = isLava ? 'VolcanicLavaRiverMesh' : 'ValleyRiverWaterMesh';
+        riverMesh.frustumCulled = false;
         addMapMesh(riverMesh);
     }
 
@@ -13669,9 +13719,24 @@ function validateRiverGeometry() {
     const issues = [];
     if (!HAS_VALLEY_RIVER) return { valid: true, issues };
 
+    if (ACTIVE_PLANET_BIOME === 'ocean') {
+        if (!Array.isArray(window.OCEAN_ISLANDS) || window.OCEAN_ISLANDS.length < 5) {
+            issues.push({ type: 'ocean_missing_islands', count: window.OCEAN_ISLANDS ? window.OCEAN_ISLANDS.length : 0 });
+        } else {
+            window.OCEAN_ISLANDS.forEach(isl => {
+                const centerH = getTerrainHeight(isl.x, isl.z);
+                if (centerH <= RIVER_WATER_Y + 0.25) {
+                    issues.push({ type: 'ocean_island_submerged', id: isl.id, centerH, waterY: RIVER_WATER_Y });
+                }
+            });
+        }
+        return { valid: issues.length === 0, issues };
+    }
+
+    const maxAllowedHalfW = ACTIVE_PLANET_BIOME === 'lava' ? 7.8 : 6.5;
     for (let s = -62; s <= 62; s += 2.0) {
         const hw = getRiverHalfWidthAtS(s);
-        if (hw < 2.2 || hw > 6.5) {
+        if (hw < 2.2 || hw > maxAllowedHalfW) {
             issues.push({ type: 'river_invalid_width', s, halfWidth: hw });
         }
         const centerU = getRiverCenterUAtS(s);
@@ -13691,11 +13756,13 @@ function validateBridgeConnections() {
     for (let i = 0; i < RIVER_BRIDGES.length; i++) {
         const rb = RIVER_BRIDGES[i];
         const s0 = rb.sCoord;
-        const localSlope = getRiverTangentSlopeAtS(s0);
-        const expectedYaw = RIVER_ANGLE - Math.atan(localSlope);
-        const yawErr = Math.abs(THREE.MathUtils.euclideanModulo((rb.yaw ?? expectedYaw) - expectedYaw + Math.PI, Math.PI * 2) - Math.PI);
-        if (yawErr > 0.15) {
-            issues.push({ type: 'bridge_orientation_mismatch', bridgeIndex: i, yawErr, expectedYaw });
+        if (!rb.isCustomIslandBridge) {
+            const localSlope = getRiverTangentSlopeAtS(s0);
+            const expectedYaw = RIVER_ANGLE - Math.atan(localSlope);
+            const yawErr = Math.abs(THREE.MathUtils.euclideanModulo((rb.yaw ?? expectedYaw) - expectedYaw + Math.PI, Math.PI * 2) - Math.PI);
+            if (yawErr > 0.15) {
+                issues.push({ type: 'bridge_orientation_mismatch', bridgeIndex: i, yawErr, expectedYaw });
+            }
         }
         const rampReachU = rb.rampReachU || (getRiverHalfWidthAtS(s0) + 3.45);
         [-1, 1].forEach(endSign => {
@@ -13711,16 +13778,18 @@ function validateBridgeConnections() {
                     toeGroundH
                 });
             }
-            const roadFactorAtToe = getSupplyRoadFactor(toePt.x, toePt.z);
-            if (roadFactorAtToe < 0.20) {
-                issues.push({
-                    type: 'bridge_disconnected_from_road',
-                    bridgeIndex: i,
-                    endSign,
-                    x: toePt.x,
-                    z: toePt.z,
-                    roadFactorAtToe
-                });
+            if (!rb.isCustomIslandBridge && ACTIVE_PLANET_BIOME !== 'ocean') {
+                const roadFactorAtToe = getSupplyRoadFactor(toePt.x, toePt.z);
+                if (roadFactorAtToe < 0.20) {
+                    issues.push({
+                        type: 'bridge_disconnected_from_road',
+                        bridgeIndex: i,
+                        endSign,
+                        x: toePt.x,
+                        z: toePt.z,
+                        roadFactorAtToe
+                    });
+                }
             }
         });
     }
